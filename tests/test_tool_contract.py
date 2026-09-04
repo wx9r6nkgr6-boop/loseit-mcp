@@ -91,7 +91,7 @@ class TestOutputSchemaContract:
         have it — a client reading structuredContent from get_diary should
         keep working."""
         by_name = {t.name: t for t in _tools(settings)}
-        for name in ("get_diary", "log_food", "server_status", "whoami"):
+        for name in ("get_diary", "get_diary_range", "server_status", "whoami"):
             assert by_name[name].output_schema is not None, f"{name} lost its schema"
 
     def test_every_schema_is_serialisable(self, settings: Settings) -> None:
@@ -107,10 +107,7 @@ class TestToolSurface:
         "search_food",
         "describe_food",
         "get_diary",
-        "log_food",
-        "log_custom_food",
-        "delete_entry",
-        "log_weight",
+        "get_diary_range",
         "get_weight_history",
         "server_status",
         "whoami",

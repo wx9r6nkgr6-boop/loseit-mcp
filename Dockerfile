@@ -38,15 +38,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---- Runtime -------------------------------------------------------------
 FROM python:3.12-slim AS runtime
 
-# Run unprivileged. Azure App Service does not require root, and the app writes
-# nothing to disk — credential URLs are sealed with a secret, not stored.
+# Run unprivileged. A token is mounted read-only at runtime.
 RUN groupadd --system --gid 1001 app \
     && useradd --system --uid 1001 --gid app --create-home app
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    LOSEIT_MULTI_TENANT=1 \
     PORT=8000
 
 WORKDIR /app
@@ -67,7 +65,7 @@ ENV LOSEIT_BUILD_COMMIT=${BUILD_COMMIT} \
     LOSEIT_BUILD_TIME=${BUILD_TIME} \
     LOSEIT_BUILD_TAG=${BUILD_TAG}
 
-# Azure App Service pings the root path; the server answers /healthz.
+# The local HTTP server answers /healthz without contacting Lose It!.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import os,urllib.request,sys; \
 url=f\"http://127.0.0.1:{os.environ.get('PORT','8000')}/healthz\"; \

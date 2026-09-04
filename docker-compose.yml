@@ -5,16 +5,10 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # Credentials arrive per request; the container stores nothing.
-      LOSEIT_MULTI_TENANT: "1"
       PORT: "8000"
-      # Credential URLs, for clients that cannot send auth headers.
-      LOSEIT_ENROLLMENT: "1"
-      # Seals and opens those URLs. Rotating it invalidates every issued URL.
-      # Generate with: loseit-mcp gen-secret
-      LOSEIT_URL_SECRET: "${LOSEIT_URL_SECRET:?set LOSEIT_URL_SECRET}"
-      # Enrollment is open by default. Uncomment to restrict it.
-      # LOSEIT_ENROLL_SECRET: "${LOSEIT_ENROLL_SECRET:-}"
+    volumes:
+      # An owner-only liauth file on the host; never bake it into the image.
+      - "${LOSEIT_TOKEN_FILE:?set LOSEIT_TOKEN_FILE}:/home/app/.config/loseit-readonly/liauth:ro"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status==200 else 1)"]
       interval: 30s
@@ -22,7 +16,7 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
-    # Nothing is written to disk, so the filesystem can stay read-only.
+    # The MCP server itself writes nothing; the token mount is also read-only.
     read_only: true
     security_opt:
       - no-new-privileges:true

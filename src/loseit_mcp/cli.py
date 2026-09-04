@@ -1,648 +1,169 @@
-"""Command-line interface.
-
-Two roles:
-
-- ``loseit-mcp serve`` runs the MCP server over stdio (default) or
-  streamable HTTP.
-- The remaining commands (``search``, ``diary``, ``log``, ``delete``, …) call
-  the same service layer directly, so you can exercise every operation without
-  an MCP client in the loop.
-
-Credentials resolve from CLI flags, then environment, then ``.env``, then a
-JSON config file — see :mod:`loseit_mcp.config`.
-"""
+"""Read-only command line and MCP server launcher."""
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Any
 
-from .config import ConfigError, Settings, load_settings
-from .sealed import UrlSealer
-from .service import LoseItService
-from .throttle import (
-    CREDENTIAL_LIMIT,
-    ENROLL_LIMIT,
-    MCP_LIMIT,
-    ThrottleMiddleware,
-    describe,
-    limit_from_env,
-)
-
-
-def _add_credential_flags(parser: argparse.ArgumentParser) -> None:
-    group = parser.add_argument_group("credentials")
-    group.add_argument("--email", help="Lose It! account email.")
-    group.add_argument("--password", help="Lose It! account password.")
-    group.add_argument("--token", help="A liauth JWT, used instead of email/password.")
-    group.add_argument("--config", type=Path, help="Path to a JSON config file.")
-    group.add_argument("--env-file", type=Path, help="Path to a .env file.")
-    group.add_argument(
-        "--hours-from-gmt",
-        type=int,
-        help="UTC offset in whole hours (auto-detected by default).",
-    )
-
-
-def _settings_from_args(args: argparse.Namespace) -> Settings:
-    return load_settings(
-        config_file=getattr(args, "config", None),
-        env_file=getattr(args, "env_file", None),
-        email=getattr(args, "email", None),
-        password=getattr(args, "password", None),
-        token=getattr(args, "token", None),
-        hours_from_gmt=getattr(args, "hours_from_gmt", None),
-    )
+from .auth import save_token
+from .config import ConfigError, load_settings
+from .readonly_service import ReadOnlyLoseItService
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loseit-mcp",
-        description="MCP server and CLI for the Lose It! food diary.",
+        description="Read-only access to Lose It! food, diary, and weight data.",
     )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit raw JSON instead of formatted text.",
-    )
-    _add_credential_flags(parser)
-
+    parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    parser.add_argument("--config", type=Path, help="Optional JSON configuration path.")
+    parser.add_argument("--env-file", type=Path, help="Optional environment file path.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    serve = sub.add_parser("serve", help="Run the MCP server.")
+    serve = sub.add_parser("serve", help="Run the read-only MCP server.")
     serve.add_argument(
-        "--transport",
-        choices=("stdio", "streamable-http", "sse"),
-        default="stdio",
-        help="Transport to serve on (default: stdio).",
+        "--transport", choices=("stdio", "streamable-http"), default="stdio"
     )
-    serve.add_argument("--host", default="127.0.0.1", help="Bind host for HTTP transports.")
-    serve.add_argument("--port", type=int, default=8000, help="Bind port for HTTP transports.")
-    serve.add_argument("--path", default="/mcp", help="URL path for streamable HTTP.")
-    serve.add_argument(
-        "--multi-tenant",
-        action="store_true",
-        default=os.environ.get("LOSEIT_MULTI_TENANT", "").lower() in ("1", "true", "yes"),
-        help=(
-            "Take Lose It! credentials from each request's headers instead of the "
-            "environment. Required for hosting one server for multiple accounts."
-        ),
-    )
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--path", default="/mcp")
 
+    sub.add_parser("import-token", help="Securely save a liauth session token (hidden prompt).")
     sub.add_parser("whoami", help="Show the authenticated account.")
+    sub.add_parser("status", help="Test read-only server authentication and connectivity.")
 
-    search = sub.add_parser("search", help="Search the food database.")
-    search.add_argument("query", help="Food name to search for.")
-    search.add_argument("-n", "--limit", type=int, default=10, help="Max results.")
+    search = sub.add_parser("search", help="Search foods without logging anything.")
+    search.add_argument("query")
+    search.add_argument("-n", "--limit", type=int, default=10)
 
-    describe = sub.add_parser("describe", help="Show nutrition detail for a food.")
-    describe.add_argument("food_id", help="32-character hex food ID.")
+    describe = sub.add_parser("describe", help="Read nutrition detail for a food.")
+    describe.add_argument("food_id")
 
-    diary = sub.add_parser("diary", help="Show the food log for a day.")
-    diary.add_argument(
-        "date",
-        nargs="?",
-        help="YYYY-MM-DD, 'today', or 'yesterday' (default: today).",
-    )
+    diary = sub.add_parser("diary", help="Read one diary day.")
+    diary.add_argument("date", nargs="?")
 
-    log = sub.add_parser("log", help="Log a food to a meal.")
-    log.add_argument("food_id", help="32-character hex food ID.")
-    log.add_argument(
-        "-m",
-        "--meal",
-        default="snacks",
-        choices=("breakfast", "lunch", "dinner", "snacks", "snack"),
-        help="Meal to log to (default: snacks).",
-    )
-    log.add_argument("-s", "--servings", type=float, help="Multiplier of the default serving.")
-    log.add_argument("-a", "--amount", type=float, help="Quantity, paired with --unit.")
-    log.add_argument("-u", "--unit", help="Unit for --amount, e.g. g, mL, cup, oz.")
-    log.add_argument("-d", "--date", help="Day to log to (default: today).")
-    log.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview the calorie math without writing.",
-    )
+    diary_range = sub.add_parser("diary-range", help="Read up to 31 inclusive diary days.")
+    diary_range.add_argument("start_date")
+    diary_range.add_argument("end_date")
 
-    custom = sub.add_parser(
-        "log-custom",
-        help="Log a food by its nutrition values, with no database lookup.",
-    )
-    custom.add_argument("name", help="Food name as it should appear in the diary.")
-    custom.add_argument("calories", type=float, help="Calories per serving.")
-    custom.add_argument(
-        "-m",
-        "--meal",
-        default="snacks",
-        choices=("breakfast", "lunch", "dinner", "snacks", "snack"),
-        help="Meal to log to (default: snacks).",
-    )
-    custom.add_argument("-b", "--brand", default="", help="Brand or restaurant.")
-    custom.add_argument("-p", "--protein", type=float, help="Protein (g).")
-    custom.add_argument("-c", "--carbs", type=float, help="Carbohydrate (g).")
-    custom.add_argument("-f", "--fat", type=float, help="Total fat (g).")
-    custom.add_argument("--sat-fat", type=float, help="Saturated fat (g).")
-    custom.add_argument("--fiber", type=float, help="Fiber (g).")
-    custom.add_argument("--sugar", type=float, help="Sugar (g).")
-    custom.add_argument("--sodium", type=float, help="Sodium (mg).")
-    custom.add_argument("--cholesterol", type=float, help="Cholesterol (mg).")
-    custom.add_argument("-s", "--servings", type=float, default=1.0, help="Servings.")
-    custom.add_argument("-d", "--date", help="Day to log to (default: today).")
-    custom.add_argument("--dry-run", action="store_true", help="Preview without writing.")
-
-    weigh = sub.add_parser("weigh", help="Record a weigh-in.")
-    weigh.add_argument("weight", type=float, help="Body weight in the account's unit.")
-    weigh.add_argument("-d", "--date", help="Day to record (default: today).")
-    weigh.add_argument("--dry-run", action="store_true", help="Preview without writing.")
-
-    weights = sub.add_parser("weights", help="Show weigh-in history.")
-    weights.add_argument("-s", "--start", help="First day (YYYY-MM-DD).")
-    weights.add_argument("-e", "--end", help="Last day (YYYY-MM-DD, default: today).")
-    weights.add_argument("-n", "--days", type=int, default=30, help="Window size.")
-
-    enroll = sub.add_parser(
-        "enroll",
-        help="Get a credential URL from a hosted server.",
-        description=(
-            "Asks a hosted loseit-mcp server to seal your credentials into a "
-            "URL you can hand to an MCP client. Secrets are read from the "
-            "environment or prompted for — never passed on the command line, "
-            "where they would land in shell history and process listings."
-        ),
-    )
-    enroll.add_argument(
-        "server",
-        help="Base URL of the hosted server, e.g. https://my-loseit-mcp.azurewebsites.net",
-    )
-    enroll.add_argument("--email", help="Lose It! account email (prompted if omitted).")
-    enroll.add_argument(
-        "--ttl-days",
-        type=int,
-        help="Days before the URL stops working (server default: 365).",
-    )
-    enroll.add_argument(
-        "--tz",
-        type=int,
-        dest="tz_offset",
-        help="Your UTC offset in whole hours, e.g. -7. Defaults to this machine's.",
-    )
-    enroll.add_argument(
-        "--insecure",
-        action="store_true",
-        help="Allow a plain-http server URL. Only for local testing.",
-    )
-
-    sub.add_parser(
-        "gen-secret",
-        help="Print a random secret suitable for LOSEIT_URL_SECRET.",
-    )
-
-    delete = sub.add_parser("delete", help="Delete a diary entry.")
-    delete.add_argument("entry_id", help="entry_id from the diary command.")
-    delete.add_argument("-d", "--date", help="Day the entry is on (default: today).")
-
+    weights = sub.add_parser("weights", help="Read weight history.")
+    weights.add_argument("--start")
+    weights.add_argument("--end")
+    weights.add_argument("--days", type=int, default=30)
     return parser
 
 
-# ── Output formatting ───────────────────────────────────────────────────
-
-
-def _print_json(data: Any) -> None:
-    print(json.dumps(data, indent=2, default=str))
-
-
-def _print_search(results: list[dict[str, Any]]) -> None:
-    if not results:
-        print("No foods found.")
-        return
-    for r in results:
-        brand = f"  [{r['brand']}]" if r.get("brand") else ""
-        print(f"{r.get('food_id')}  {r.get('name')}{brand}")
-
-
-def _print_diary(day: dict[str, Any]) -> None:
-    print(f"{day['date']} — {day['entry_count']} entries, {day['total_calories']:g} cal")
-    if not day["entries"]:
-        return
-    by_meal: dict[str, list[dict[str, Any]]] = {}
-    for entry in day["entries"]:
-        by_meal.setdefault(entry["meal"], []).append(entry)
-
-    for meal in ("breakfast", "lunch", "dinner", "snacks"):
-        items = by_meal.get(meal)
-        if not items:
-            continue
-        subtotal = sum(i.get("calories") or 0 for i in items)
-        print(f"\n{meal.upper()} ({subtotal:.0f} cal)")
-        for i in items:
-            brand = f" [{i['food_brand']}]" if i.get("food_brand") else ""
-            amount = i.get("amount")
-            portion = f"{amount:g} {i.get('unit') or ''}".strip()
-            print(
-                f"  {i.get('calories') or 0:>7.1f} cal  {portion:<16} "
-                f"{i.get('food_name')}{brand}"
-            )
-            print(f"  {'':>7}       {i.get('entry_id')}")
+def _print(value: Any) -> None:
+    print(json.dumps(value, indent=2, ensure_ascii=False, default=str))
 
 
 def _print_logged(result: dict[str, Any]) -> None:
+    """Legacy formatter retained for upstream test compatibility; unreachable."""
     prefix = "DRY RUN — would log" if result.get("dry_run") else "Logged"
     food = result.get("food") or {}
-    # Calories are None for foods that carry no calorie data (raw produce,
-    # condiments); the write has already happened by now, so never crash here.
     calories = result.get("calories")
     suffix = f" ({calories:.0f} cal)" if isinstance(calories, int | float) else ""
     print(
         f"{prefix}: {food.get('name')} — {result.get('portion_size')} "
-        f"{result.get('measure_unit')} to {result.get('meal')} on {result.get('date')}"
-        f"{suffix}"
+        f"{result.get('measure_unit')} to {result.get('meal')} on {result.get('date')}{suffix}"
     )
-
-
-# ── Dispatch ────────────────────────────────────────────────────────────
-
-
-def _build_sealer(settings: Settings) -> UrlSealer | None:
-    """Build the URL sealer when credential URLs are enabled.
-
-    Stateless by design: the secret is the only thing that needs to persist, so
-    there is no store to configure, no volume to mount, and nothing to lose on
-    restart.
-    """
-    if os.environ.get("LOSEIT_ENROLLMENT", "").lower() not in ("1", "true", "yes"):
-        return None
-
-    secret = os.environ.get("LOSEIT_URL_SECRET")
-    if not secret:
-        raise ConfigError(
-            "LOSEIT_ENROLLMENT requires LOSEIT_URL_SECRET — it is the key that "
-            "seals and opens credential URLs. Generate one with: "
-            "loseit-mcp gen-secret"
-        )
-    # LOSEIT_ENROLL_SECRET is optional. An open endpoint mints URLs only for
-    # accounts whose password the caller already knows, so it grants no access
-    # they didn't already have; per-address and per-email throttling covers the
-    # abuse case, including the guessing that credential verification would
-    # otherwise enable. Set it to keep an instance private.
-    return UrlSealer(secret.encode("utf-8"), enroll_url=_public_enroll_url())
-
-
-def _public_enroll_url() -> str | None:
-    """Where users should go to get a replacement URL, if we can tell.
-
-    A URL that has expired or been invalidated by a secret rotation is most
-    likely held by someone who enrolled through the web page and has never
-    installed the CLI, so the error needs to name a place they can actually go.
-
-    App Service sets ``WEBSITE_HOSTNAME`` for us; ``LOSEIT_PUBLIC_URL`` overrides
-    it for anywhere that doesn't. Returning ``None`` simply falls back to
-    generic wording — this is a nicety, not something to fail startup over.
-    """
-    configured = os.environ.get("LOSEIT_PUBLIC_URL")
-    if configured:
-        return configured.rstrip("/") + "/"
-
-    hostname = os.environ.get("WEBSITE_HOSTNAME")
-    if hostname:
-        return f"https://{hostname.strip().rstrip('/')}/"
-    return None
-
-
-def _transport_security() -> Any:
-    """Configure the transport's DNS-rebinding protection.
-
-    The MCP transport validates the Host header against an allowlist that
-    defaults to localhost, so a hosted deployment must declare its own hostname
-    or every request is rejected with "Invalid Host header".
-
-    ``LOSEIT_ALLOWED_HOSTS`` takes a comma-separated list. On Azure App Service
-    the site's hostnames are discoverable from the environment, so the common
-    case needs no configuration at all.
-    """
-    from mcp.server.transport_security import TransportSecuritySettings
-
-    hosts: list[str] = []
-    configured = os.environ.get("LOSEIT_ALLOWED_HOSTS", "")
-    hosts.extend(h.strip() for h in configured.split(",") if h.strip())
-
-    # WEBSITE_HOSTNAME is set by App Service; include it and any custom
-    # hostnames bound to the site.
-    for name in ("WEBSITE_HOSTNAME", "HTTP_HOST"):
-        value = os.environ.get(name)
-        if value:
-            hosts.append(value)
-
-    if not hosts:
-        return None  # keep the library's localhost-only default
-
-    # Origins must carry a scheme; hosts must not.
-    origins = [f"https://{h}" for h in hosts] + [f"http://{h}" for h in hosts]
-    return TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=hosts,
-        allowed_origins=origins,
-    )
-
-
-def _run_serve(args: argparse.Namespace, settings: Settings) -> int:
-    import uvicorn
-
-    from . import build_info
-    from .enroll import VERIFY_LIMIT, add_enrollment_route, verify_credentials
-    from .server import build_server
-    from .webapp import PathTokenMiddleware, install_log_redaction
-
-    multi_tenant = getattr(args, "multi_tenant", False)
-    sealer = _build_sealer(settings) if multi_tenant else None
-
-    # In multi-tenant mode credentials come from each request, so the process
-    # itself needs none — and shouldn't be started with any.
-    if not multi_tenant:
-        settings.require_credentials()
-
-    if args.transport == "stdio":
-        if multi_tenant:
-            print(
-                "error: --multi-tenant needs per-request context, which stdio "
-                "has none of. Use --transport streamable-http.",
-                file=sys.stderr,
-            )
-            return 2
-        build_server(settings).run("stdio")
-        return 0
-
-    mcp = build_server(settings, multi_tenant=multi_tenant, sealer=sealer)
-    _add_health_route(mcp)
-    if sealer is not None:
-        add_enrollment_route(
-            mcp,
-            sealer,
-            mount_path=args.path,
-            enroll_secret=os.environ.get("LOSEIT_ENROLL_SECRET"),
-            # Check the credentials before issuing a URL. Without this, a typo
-            # yields a link that looks fine and fails on every tool call, with
-            # nothing to point at the cause.
-            verify=verify_credentials,
-            verify_limit=limit_from_env("LOSEIT_VERIFY_RATE", VERIFY_LIMIT),
-            serve_page=True,
-        )
-
-    mode = "multi-tenant" if multi_tenant else "single-account"
-    if sealer is not None:
-        mode += " + credential URLs"
-
-    if args.transport == "sse":
-        print(f"Serving MCP ({mode}) over SSE at http://{args.host}:{args.port}", file=sys.stderr)
-        mcp.run("sse", host=args.host, port=args.port)
-        return 0
-
-    app = mcp.streamable_http_app(
-        streamable_http_path=args.path,
-        transport_security=_transport_security(),
-    )
-    if sealer is not None:
-        app = PathTokenMiddleware(app, mount_path=args.path)
-
-    # Throttling wraps everything, so it runs before routing and before any
-    # credential work. Health probes are exempt.
-    enroll_limit = limit_from_env("LOSEIT_ENROLL_RATE", ENROLL_LIMIT)
-    mcp_limit = limit_from_env("LOSEIT_MCP_RATE", MCP_LIMIT)
-    credential_limit = limit_from_env("LOSEIT_CREDENTIAL_RATE", CREDENTIAL_LIMIT)
-    app = ThrottleMiddleware(
-        app,
-        enroll_limit=enroll_limit,
-        mcp_limit=mcp_limit,
-        credential_limit=credential_limit,
-        trusted_proxies=int(os.environ.get("LOSEIT_TRUSTED_PROXIES", "1")),
-    )
-
-    print(
-        f"Serving MCP ({mode}) over streamable HTTP at "
-        f"http://{args.host}:{args.port}{args.path}\n"
-        f"  throttle: /enroll {describe(enroll_limit)}, "
-        f"tools {describe(mcp_limit)} per address; "
-        f"{describe(credential_limit)} per credential",
-        file=sys.stderr,
-    )
-
-    # Own the logging config so redaction survives: uvicorn's own dictConfig
-    # replaces handlers during startup, which would drop filters installed
-    # beforehand. Sealed URLs are credentials, so this has to be reliable.
-    #
-    # Applied in both branches. Only the sealer branch can produce /u/<sealed>/
-    # paths today, but nothing enforces that, and the cost of redacting when
-    # there is nothing to redact is zero.
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(message)s", force=True)
-    install_log_redaction()
-
-    build = build_info()
-    logging.getLogger(__name__).info(
-        "starting version=%s commit=%s image=%s mode=%s",
-        build.get("version"),
-        build.get("commit"),
-        build.get("image_tag"),
-        mode,
-    )
-
-    uvicorn.run(app, host=args.host, port=args.port, log_config=None)
-    return 0
 
 
 def _add_health_route(mcp: Any) -> None:
-    """Expose ``/healthz`` for container and platform health probes.
-
-    Deliberately unauthenticated and dependency-free: it reports that the
-    process is serving, not that Lose It! is reachable, so a Lose It outage
-    doesn't cause the platform to kill otherwise-healthy instances.
-
-    It also reports the running build, so "is my change actually deployed?" is
-    answerable from outside the box rather than inferred from logs. The
-    ``client`` block echoes how the server resolved the caller's address, which
-    is what rate limiting keys on — the one piece of state that behaves
-    differently behind a proxy and is otherwise invisible.
-    """
-    from starlette.requests import Request
+    """Dependency-free process health endpoint for local HTTP deployments."""
     from starlette.responses import JSONResponse
 
     from . import build_info
     from .throttle import client_key
 
-    trusted = int(os.environ.get("LOSEIT_TRUSTED_PROXIES", "1"))
-
     @mcp.custom_route("/healthz", methods=["GET"])
-    async def healthz(request: Request) -> JSONResponse:
+    async def healthz(_request: Any) -> JSONResponse:
         return JSONResponse(
             {
                 "status": "ok",
+                "read_only": True,
                 "build": build_info(),
-                "client": {
-                    "resolved": client_key(request.scope, trusted),
-                    "trusted_proxies": trusted,
-                },
+                "client": {"resolved": client_key(_request.scope, 1), "trusted_proxies": 1},
             }
         )
 
 
-def _run_command(args: argparse.Namespace, settings: Settings) -> int:
-    as_json = args.json
-
-    with LoseItService(settings) as svc:
-        if args.command == "whoami":
-            _print_json(svc.whoami())
-
-        elif args.command == "search":
-            # No detail: this command prints id/name/brand only, so enriching
-            # would pay one RPC per hit for data nothing here displays.
-            results = svc.search_food(args.query, limit=args.limit, detail=False)
-            _print_json(results) if as_json else _print_search(results)
-
-        elif args.command == "describe":
-            _print_json(svc.describe_food(args.food_id))
-
-        elif args.command == "diary":
-            day = svc.get_diary(args.date)
-            _print_json(day) if as_json else _print_diary(day)
-
-        elif args.command == "log":
-            result = svc.log_food(
-                args.food_id,
-                meal=args.meal,
-                servings=args.servings,
-                serving_amount=args.amount,
-                serving_unit=args.unit,
-                when=args.date,
-                dry_run=args.dry_run,
-            )
-            _print_json(result) if as_json else _print_logged(result)
-
-        elif args.command == "log-custom":
-            result = svc.log_custom_food(
-                name=args.name,
-                calories=args.calories,
-                meal=args.meal,
-                brand=args.brand,
-                protein_g=args.protein,
-                carb_g=args.carbs,
-                fat_g=args.fat,
-                saturated_fat_g=args.sat_fat,
-                fiber_g=args.fiber,
-                sugar_g=args.sugar,
-                sodium_mg=args.sodium,
-                cholesterol_mg=args.cholesterol,
-                servings=args.servings,
-                when=args.date,
-                dry_run=args.dry_run,
-            )
-            if as_json:
-                _print_json(result)
-            else:
-                prefix = "DRY RUN — would log" if result["dry_run"] else "Logged"
-                food = result["food"]
-                brand = f" [{food['brand']}]" if food["brand"] else ""
-                print(
-                    f"{prefix}: {food['name']}{brand} to {result['meal']} "
-                    f"on {result['date']} ({result['calories']:g} cal)"
-                )
-                if result.get("warning"):
-                    print(f"  warning: {result['warning']}")
-
-        elif args.command == "weigh":
-            result = svc.log_weight(args.weight, when=args.date, dry_run=args.dry_run)
-            if as_json:
-                _print_json(result)
-            else:
-                prefix = "DRY RUN — would record" if result["dry_run"] else "Recorded"
-                print(f"{prefix}: {result['weight']:g} on {result['date']}")
-
-        elif args.command == "weights":
-            hist = svc.get_weight_history(start=args.start, end=args.end, days=args.days)
-            if as_json:
-                _print_json(hist)
-            else:
-                print(f"{hist['start']} to {hist['end']} — {hist['count']} weigh-ins")
-                for e in hist["entries"]:
-                    print(f"  {e['date']}  {e['weight']:g}")
-                if hist["count"]:
-                    print(
-                        f"\nlatest {hist['latest']:g} | min {hist['min']:g} | "
-                        f"max {hist['max']:g} | change {hist['change']:+g}"
-                    )
-
-        elif args.command == "delete":
-            result = svc.delete_entry(args.entry_id, when=args.date)
-            if as_json:
-                _print_json(result)
-            else:
-                entry = result.get("entry") or {}
-                print(f"Deleted: {entry.get('food_name')} ({entry.get('meal')})")
-
-    return 0
+def _settings(args: argparse.Namespace):
+    return load_settings(config_file=args.config, env_file=args.env_file)
 
 
-def _run_enroll(args: argparse.Namespace) -> int:
-    """Fetch a credential URL from a hosted server and print it."""
-    from .enroll_client import EnrollClientError, enroll
+def _serve(args: argparse.Namespace) -> int:
+    from .server import build_server
 
-    try:
-        result = enroll(
-            args.server,
-            email=args.email,
-            ttl_days=args.ttl_days,
-            tz_offset=args.tz_offset,
-            allow_insecure=args.insecure,
+    settings = _settings(args)
+    settings.require_credentials()
+    mcp = build_server(settings)
+    if args.transport == "stdio":
+        mcp.run("stdio")
+    else:
+        _add_health_route(mcp)
+        mcp.run(
+            "streamable-http",
+            host=args.host,
+            port=args.port,
+            streamable_http_path=args.path,
         )
-    except EnrollClientError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    if args.json:
-        _print_json(result)
-        return 0
-
-    print("\nAdd this to your MCP client configuration:\n")
-    print(f"  {result['url']}\n")
-    ttl = result.get("expires_in_days")
-    if ttl:
-        print(f"It stops working in {ttl} days.")
-    print(
-        "Treat this URL as a password: it grants access to your Lose It! "
-        "account.\nIt cannot be revoked individually — if it leaks, the server "
-        "operator must\nrotate LOSEIT_URL_SECRET, which invalidates every "
-        "issued URL."
-    )
     return 0
+
+
+def _status(service: ReadOnlyLoseItService) -> dict[str, Any]:
+    identity = service.whoami()
+    service.search_food("water", limit=1, detail=False)
+    return {
+        "ok": True,
+        "read_only": True,
+        "account": {
+            "user_name": identity.get("user_name"),
+            "email": identity.get("email"),
+            "hours_from_gmt": identity.get("hours_from_gmt"),
+        },
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Windows consoles default to a legacy code page, which mangles em-dashes
-    # and any non-ASCII food name (e.g. "Häagen-Dazs").
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            try:
-                reconfigure(encoding="utf-8", errors="replace")
-            except (OSError, ValueError):
-                pass
-
     args = build_parser().parse_args(argv)
     try:
-        settings = _settings_from_args(args)
-        if args.command == "serve":
-            return _run_serve(args, settings)
-        if args.command == "enroll":
-            return _run_enroll(args)
-        if args.command == "gen-secret":
-            import secrets
-
-            print(secrets.token_urlsafe(32))
+        if args.command == "import-token":
+            settings = _settings(args)
+            token = getpass.getpass("Paste Lose It! liauth token (input hidden): ")
+            save_token(token, settings.token_file)
+            print(f"Saved an owner-only token at {settings.token_file}")
             return 0
-        return _run_command(args, settings)
-    except (ConfigError, ValueError) as exc:
+        if args.command == "serve":
+            return _serve(args)
+
+        with ReadOnlyLoseItService(_settings(args)) as service:
+            if args.command == "whoami":
+                result = service.whoami()
+            elif args.command == "status":
+                result = _status(service)
+            elif args.command == "search":
+                result = service.search_food(args.query, limit=args.limit)
+            elif args.command == "describe":
+                result = service.describe_food(args.food_id)
+            elif args.command == "diary":
+                result = service.get_diary(args.date)
+            elif args.command == "diary-range":
+                result = service.get_diary_range(args.start_date, args.end_date)
+            elif args.command == "weights":
+                result = service.get_weight_history(
+                    start=args.start, end=args.end, days=args.days
+                )
+            else:  # pragma: no cover - argparse owns command validation
+                raise AssertionError(args.command)
+        _print(result)
+        return 0
+    except (ConfigError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
@@ -650,4 +171,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     raise SystemExit(main())

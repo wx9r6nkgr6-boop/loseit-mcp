@@ -24,9 +24,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-CONFIG_DIR = Path.home() / ".config" / "loseit-mcp"
+CONFIG_DIR = Path.home() / ".config" / "loseit-readonly"
 DEFAULT_CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_SESSION_FILE = CONFIG_DIR / "session.json"
+DEFAULT_TOKEN_FILE = CONFIG_DIR / "liauth"
 
 # Tied to the current Lose It! web build. Override if they ship a new one and
 # the RPCs start failing.
@@ -64,6 +65,7 @@ class Settings:
     base_url: str = DEFAULT_BASE_URL
 
     session_file: Path = DEFAULT_SESSION_FILE
+    token_file: Path = DEFAULT_TOKEN_FILE
 
     # Whether a resolved session may be written to (and read from) the on-disk
     # cache. Must be False in multi-tenant serving: the path is process-wide,
@@ -78,14 +80,14 @@ class Settings:
 
     @property
     def has_credentials(self) -> bool:
-        return bool(self.token) or bool(self.email and self.password)
+        return bool(self.token) or self.token_file.is_file() or bool(self.email and self.password)
 
     def require_credentials(self) -> None:
         if not self.has_credentials:
             raise ConfigError(
                 "No Lose It! credentials. Supply --email/--password, set "
                 "LOSEIT_EMAIL/LOSEIT_PASSWORD (env or .env), or provide a "
-                "token via --token / LOSEIT_TOKEN."
+                "token via LOSEIT_TOKEN or LOSEIT_TOKEN_FILE."
             )
 
     def redacted(self) -> dict[str, Any]:
@@ -106,6 +108,7 @@ class Settings:
             "strong_name": self.strong_name,
             "base_url": self.base_url,
             "session_file": str(self.session_file),
+            "token_file": str(self.token_file),
         }
 
 
@@ -133,6 +136,7 @@ def _from_env() -> dict[str, Any]:
         "policy_hash": os.environ.get("LOSEIT_POLICY_HASH"),
         "base_url": os.environ.get("LOSEIT_BASE_URL"),
         "session_file": os.environ.get("LOSEIT_SESSION_PATH"),
+        "token_file": os.environ.get("LOSEIT_TOKEN_FILE"),
     }
     return {k: v for k, v in raw.items() if v not in (None, "")}
 
@@ -146,6 +150,8 @@ def _coerce(data: dict[str, Any]) -> dict[str, Any]:
         out["user_id"] = str(out["user_id"])
     if "session_file" in out and out["session_file"] is not None:
         out["session_file"] = Path(out["session_file"]).expanduser()
+    if "token_file" in out and out["token_file"] is not None:
+        out["token_file"] = Path(out["token_file"]).expanduser()
     # Ignore unknown keys rather than exploding on a stale config file.
     allowed = set(Settings.__dataclass_fields__)
     return {k: v for k, v in out.items() if k in allowed}

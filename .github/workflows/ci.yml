@@ -41,7 +41,7 @@ jobs:
       - name: Verify it serves and reports healthy
         run: |
           docker run -d --name ci-check -p 8000:8000 \
-            -e LOSEIT_CACHE_SECRET=ci-secret loseit-mcp:ci
+            -e LOSEIT_TOKEN=header.payload.signature loseit-mcp:ci
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8000/healthz; then
               echo "healthy"

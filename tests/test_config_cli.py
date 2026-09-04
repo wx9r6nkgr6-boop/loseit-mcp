@@ -109,9 +109,9 @@ class TestParser:
         assert args.transport == "streamable-http"
         assert args.port == 9000
 
-    def test_log_accepts_a_portion(self) -> None:
-        args = build_parser().parse_args(["log", "abc", "-m", "lunch", "-a", "120", "-u", "g"])
-        assert (args.meal, args.amount, args.unit) == ("lunch", 120.0, "g")
+    def test_log_command_is_not_available(self) -> None:
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["log", "abc"])
 
     def test_rejects_an_unknown_meal(self) -> None:
         with pytest.raises(SystemExit):

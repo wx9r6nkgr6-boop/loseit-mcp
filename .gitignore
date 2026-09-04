@@ -6,6 +6,16 @@ token
 *.token
 secrets.json
 *.secret
+liauth
+session.json
+
+# Personal nutrition data (canonical SQLite DB, snapshots, exports, reports)
+data/*
+!data/README.md
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 
 # Deployment notes containing real Azure resource names
 DEPLOYMENT-PRIVATE.md
@@ -30,4 +40,3 @@ tmp-*.json
 *.tmp
 probe_*.py
 probe_*.json
-

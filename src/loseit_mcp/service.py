@@ -547,7 +547,7 @@ class LoseItService:
     def get_diary(self, when: str | date | None = None) -> dict[str, Any]:
         """All food log entries for a day."""
         day = self._day(when)
-        entries = self._call("diary", day)
+        entries = self._reading(lambda: self.client.diary(day), what="get_diary")
         items = [_entry_to_dict(e) for e in entries]
         return {
             "date": day.isoformat(),
@@ -1094,7 +1094,9 @@ def _entry_to_dict(entry: Any) -> dict[str, Any]:
         return {"value": data}
 
     labeled = data.get("nutrients_by_label") or {}
-    macros = {k: _round(labeled[k]) for k in _MACRO_KEYS if k in labeled}
+    # Preserve every source-labelled nutrient. Unknowns stay absent; this layer
+    # never turns a missing nutrient into zero or an estimate.
+    nutrients = {str(k): _round(v) for k, v in labeled.items()}
     amount, unit = _display_portion(data)
 
     return {
@@ -1107,6 +1109,6 @@ def _entry_to_dict(entry: Any) -> dict[str, Any]:
         "unit": unit,
         "servings": _round(data.get("servings"), 3),
         "calories": _round(labeled.get("calories"), 1),
-        "nutrients": macros,
+        "nutrients": nutrients,
         "logged_at": data.get("modified_at"),
     }

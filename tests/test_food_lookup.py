@@ -639,12 +639,12 @@ class TestInstructions:
     def test_they_prefer_components_over_composite_dishes(self) -> None:
         from loseit_mcp.server import INSTRUCTIONS
 
-        assert "Chipotle" in INSTRUCTIONS
+        assert "log_food" not in INSTRUCTIONS
 
     def test_custom_food_is_last_resort(self) -> None:
         from loseit_mcp.server import INSTRUCTIONS
 
-        assert "last resort" in INSTRUCTIONS
+        assert "log_custom_food" not in INSTRUCTIONS
 
     def test_they_stay_terse(self) -> None:
         """Instructions compete with everything else in the client's context."""

@@ -24,10 +24,7 @@ EXPECTED_TOOLS = {
     "search_food",
     "describe_food",
     "get_diary",
-    "log_food",
-    "log_custom_food",
-    "delete_entry",
-    "log_weight",
+    "get_diary_range",
     "get_weight_history",
     "server_status",
     "whoami",
@@ -53,15 +50,15 @@ class TestToolSurface:
             assert tool.description and len(tool.description) > 30, tool.name
 
     @pytest.mark.anyio
-    async def test_log_food_declares_both_portion_forms(self, settings: Settings) -> None:
+    async def test_mutation_tools_are_absent(self, settings: Settings) -> None:
         tools = {t.name: t for t in await build_server(settings).list_tools()}
-        props = tools["log_food"].input_schema["properties"]
-        assert {"servings", "serving_amount", "serving_unit"} <= set(props)
+        assert {"log_food", "log_custom_food", "delete_entry", "log_weight"}.isdisjoint(tools)
 
     @pytest.mark.anyio
-    async def test_custom_food_flags_the_unsupported_nutrient(self, settings: Settings) -> None:
+    async def test_range_declares_both_dates(self, settings: Settings) -> None:
         tools = {t.name: t for t in await build_server(settings).list_tools()}
-        assert "saturated_fat_g" in tools["log_custom_food"].description
+        props = tools["get_diary_range"].input_schema["properties"]
+        assert {"start_date", "end_date"} <= set(props)
 
 
 class TestErrorTranslation:
@@ -127,7 +124,7 @@ class TestToolErrorSurfacing:
         assert "new version of their web app" in str(caught.value)
 
     @pytest.mark.anyio
-    async def test_invalid_portion_reaches_the_caller(self, settings: Settings) -> None:
+    async def test_mutation_call_is_unknown(self, settings: Settings) -> None:
         from mcp.server.mcpserver.exceptions import ToolError
 
         server = build_server(settings)
@@ -135,7 +132,7 @@ class TestToolErrorSurfacing:
             await server.call_tool(
                 "log_food", {"food_id": "a" * 32, "serving_amount": 120, "dry_run": True}
             )
-        assert "together" in str(caught.value)
+        assert "Unknown tool" in str(caught.value)
 
 
 def _http_app(sealer: UrlSealer, settings: Settings, *, enroll_secret: str | None = None) -> Any:

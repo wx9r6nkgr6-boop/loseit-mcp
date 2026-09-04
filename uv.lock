@@ -443,8 +443,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "loseit-mcp"
-version = "0.6.0"
+name = "loseit-readonly-mcp"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

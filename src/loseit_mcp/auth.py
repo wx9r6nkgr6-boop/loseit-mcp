@@ -199,6 +199,31 @@ def save_session(session: Session, path: Path) -> None:
     _write_private(path, json.dumps(session.to_dict(), indent=2))
 
 
+def save_token(token: str, path: Path) -> None:
+    """Persist a liauth token without ever making it world-readable."""
+    value = token.strip()
+    if not value:
+        raise AuthError("The token is empty.")
+    if decode_jwt_payload(value) is None:
+        raise AuthError("The token is not a JWT-shaped liauth value.")
+    _write_private(path, value + "\n")
+
+
+def load_token(path: Path) -> str | None:
+    """Load an owner-only token file, rejecting permissive POSIX modes."""
+    if not path.is_file():
+        return None
+    if os.name == "posix" and stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise AuthError(
+            f"Token file {path} is readable by other users; run: chmod 600 {path}"
+        )
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise AuthError(f"Could not read token file {path}: {exc}") from exc
+    return value or None
+
+
 def login(email: str, password: str, *, timeout: float = 30.0) -> Session:
     """Exchange credentials for a ``liauth`` JWT.
 
@@ -291,16 +316,23 @@ def resolve_session(settings: Settings, *, force_login: bool = False) -> Session
        configured account**.
     3. A fresh login with ``email`` + ``password``.
     """
-    settings.require_credentials()
+    file_token = load_token(settings.token_file)
+    effective_token = settings.token or file_token
+    if not effective_token and not (settings.email and settings.password):
+        raise ConfigError(
+            "No Lose It! session token. Run `loseit-mcp import-token`, set "
+            "LOSEIT_TOKEN, or configure LOSEIT_TOKEN_FILE. Email/password "
+            "authentication is supported only as a fallback."
+        )
     can_login = bool(settings.email and settings.password)
 
     # Only fall through to a login when we can actually perform one; otherwise
     # an expired token is still the caller's best option and the resulting API
     # error is clearer than a config error raised here.
-    if settings.token and not force_login and not (is_expired(settings.token) and can_login):
-        claims = decode_jwt_payload(settings.token) or {}
+    if effective_token and not force_login and not (is_expired(effective_token) and can_login):
+        claims = decode_jwt_payload(effective_token) or {}
         return Session(
-            token=settings.token,
+            token=effective_token,
             user_id=settings.user_id or str(claims.get("sub") or ""),
             user_name=settings.user_name or _name_from_email(settings.email or "user"),
             email=settings.email,

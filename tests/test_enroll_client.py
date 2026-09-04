@@ -47,11 +47,9 @@ class TestArgumentSurface:
         with pytest.raises(SystemExit):
             build_parser().parse_args(["enroll"])
 
-    def test_accepts_the_optional_flags(self) -> None:
-        args = build_parser().parse_args(
-            ["enroll", "https://h", "--email", "a@b.c", "--ttl-days", "30", "--tz", "-7"]
-        )
-        assert (args.email, args.ttl_days, args.tz_offset) == ("a@b.c", 30, -7)
+    def test_enroll_command_is_removed_from_read_only_cli(self) -> None:
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["enroll", "https://h"])
 
 
 class TestTransportSafety:
