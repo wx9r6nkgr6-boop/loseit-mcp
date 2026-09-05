@@ -36,6 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("import-token", help="Securely save a liauth session token (hidden prompt).")
     sub.add_parser("whoami", help="Show the authenticated account.")
     sub.add_parser("status", help="Test read-only server authentication and connectivity.")
+    sub.add_parser(
+        "compatibility-check",
+        help="Check public GWT build identifiers without credentials or configuration changes.",
+    )
 
     search = sub.add_parser("search", help="Search foods without logging anything.")
     search.add_argument("query")
@@ -141,6 +145,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "serve":
             return _serve(args)
+        if args.command == "compatibility-check":
+            from .compatibility import fetch_current_compatibility
+
+            _print(fetch_current_compatibility().to_dict())
+            return 0
 
         with ReadOnlyLoseItService(_settings(args)) as service:
             if args.command == "whoami":

@@ -143,12 +143,21 @@ class TestResolveSession:
 
     def test_expired_token_kept_when_no_credentials(self, tmp_path: Path, expired_token: str) -> None:
         # Nothing better is available; the API error is clearer than a config error.
-        only_token = Settings(token=expired_token, session_file=tmp_path / "s.json")
+        only_token = Settings(
+            token=expired_token,
+            session_file=tmp_path / "s.json",
+            token_file=tmp_path / "liauth",
+        )
         assert resolve_session(only_token).token == expired_token
 
     def test_requires_some_credential(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError):
-            resolve_session(Settings(session_file=tmp_path / "s.json"))
+            resolve_session(
+                Settings(
+                    session_file=tmp_path / "s.json",
+                    token_file=tmp_path / "liauth",
+                )
+            )
 
     def test_persist_session_false_writes_nothing(
         self, settings: Settings, monkeypatch: pytest.MonkeyPatch

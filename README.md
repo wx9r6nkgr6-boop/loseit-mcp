@@ -277,12 +277,27 @@ the underlying helper modules are retained only to reduce rebase churn.
 ## Upstream updates and breakage
 
 See [`UPSTREAM.md`](UPSTREAM.md) for audited revisions, fork changes, and the
-rebase checklist. If reads suddenly fail with an incompatible-remote-service or
-decoder error, Lose It! probably shipped a new GWT permutation. Do not retry in
-a tight loop. Compare current network requests with the constants in
-`config.py`, update only after review, then run the complete mocked suite and
-manually test `whoami`, one `search`, one `describe`, one diary day, a two-day
-range, and a short weight range.
+rebase checklist. If reads suddenly fail with an incompatible-remote-service
+error, Lose It! probably shipped a new GWT permutation or serialization policy.
+Do not retry in a tight loop. Run the explicit, credential-free check:
+
+```bash
+uv run loseit-mcp compatibility-check
+```
+
+The command makes three read-only GETs for public deployment artifacts:
+`web.nocache.js`, the Chromium cache bundle it selects, and that bundle's
+`.gwt.rpc` policy. It confirms the bundle declares its own permutation, embeds
+the `/web/service` proxy, and points to a policy containing the declarations
+needed by the read-only bootstrap request. It does not load `liauth`, contact
+`/web/service`, update configuration, or run during ordinary reads and syncs.
+
+The upstream SDK's supported process remains authoritative: confirm the actual
+`X-GWT-Permutation` header and the fifth pipe-delimited field of a captured
+`/web/service` request, then follow its parser-schema regeneration runbook if a
+new policy produces decoder/schema failures. Update defaults only after review;
+then run the complete mocked suite and manually test `whoami`, `status`, one
+search, one diary day, a two-day range, and a short weight range.
 
 ## Limitations
 

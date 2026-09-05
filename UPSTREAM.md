@@ -66,3 +66,23 @@ sanitize fixtures without cookies or JWTs, update parsers minimally, and add a
 regression fixture before changing production configuration.
 
 The read-only allowlist test is the release gate after every upstream update.
+
+## GWT compatibility refresh (2026-09-04)
+
+Lose It!'s deployed web build changed after this fork was created. Following
+`phitoduck/lose-it`'s documented refresh process, the build identifiers were
+updated from:
+
+- permutation `351AE5DC0CA36AD3BA9C7CBA7B0E07B8`
+- policy `8F87EC8969F17AE77B6283D3A83F6D4C`
+
+to the Chromium/WebKit permutation `BA1F6675680809C4804FF1CEFF6DD713`
+and policy `108644F06370DEF41E9A7D9DFEDBBC80`. The public bootstrap selects the
+permutation, its matching cache bundle embeds the policy, and the deployed
+policy artifact contains the service/request/user declarations used by the
+read-only initialization call. A read-only live status call independently
+validated the pair before the defaults changed.
+
+`loseit-mcp compatibility-check` now performs the public-artifact checks
+explicitly without credentials or configuration writes. It is diagnostic only
+and is never invoked by the normal MCP, CLI read, or synchronization paths.

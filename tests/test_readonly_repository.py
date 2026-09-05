@@ -79,6 +79,23 @@ def test_mcp_registry_is_exact_read_only_allowlist(settings: Settings) -> None:
     assert {"log_food", "log_custom_food", "log_weight", "delete_entry"}.isdisjoint(names)
 
 
+def test_read_only_facade_exposes_no_delegate_mutations() -> None:
+    public_methods = {
+        name
+        for name, value in vars(ReadOnlyLoseItService).items()
+        if callable(value) and not name.startswith("_")
+    }
+    assert public_methods == {
+        "close",
+        "describe_food",
+        "get_diary",
+        "get_diary_range",
+        "get_weight_history",
+        "search_food",
+        "whoami",
+    }
+
+
 def test_range_is_inclusive_and_totals_report_coverage() -> None:
     fake = FakeReadDelegate([entry()])
     service = ReadOnlyLoseItService(Settings(), delegate=fake)  # type: ignore[arg-type]

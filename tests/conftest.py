@@ -60,6 +60,7 @@ def settings(tmp_path: Path) -> Settings:
         user_name="Tester",
         hours_from_gmt=-7,
         session_file=tmp_path / "session.json",
+        token_file=tmp_path / "liauth",
     )
 
 

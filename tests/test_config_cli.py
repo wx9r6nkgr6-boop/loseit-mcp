@@ -17,16 +17,16 @@ class TestSettings:
         assert base.with_overrides(email=None).email == "a@b.c"
         assert base.with_overrides(email="x@y.z").email == "x@y.z"
 
-    def test_requires_a_credential(self) -> None:
+    def test_requires_a_credential(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError):
-            Settings().require_credentials()
+            Settings(token_file=tmp_path / "missing").require_credentials()
 
     def test_token_alone_is_enough(self) -> None:
         Settings(token="a.b.c").require_credentials()
 
-    def test_email_without_password_is_not(self) -> None:
+    def test_email_without_password_is_not(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError):
-            Settings(email="a@b.c").require_credentials()
+            Settings(email="a@b.c", token_file=tmp_path / "missing").require_credentials()
 
     def test_redaction_hides_secrets(self) -> None:
         shown = Settings(email="a@b.c", password="hunter2", token="a.b.c").redacted()
@@ -108,6 +108,27 @@ class TestParser:
         )
         assert args.transport == "streamable-http"
         assert args.port == 9000
+
+    def test_accepts_credential_free_compatibility_check(self) -> None:
+        assert build_parser().parse_args(["compatibility-check"]).command == (
+            "compatibility-check"
+        )
+
+    def test_cli_command_surface_has_no_remote_mutations(self) -> None:
+        parser = build_parser()
+        command_action = next(action for action in parser._actions if action.dest == "command")
+        assert set(command_action.choices) == {
+            "compatibility-check",
+            "describe",
+            "diary",
+            "diary-range",
+            "import-token",
+            "search",
+            "serve",
+            "status",
+            "weights",
+            "whoami",
+        }
 
     def test_log_command_is_not_available(self) -> None:
         with pytest.raises(SystemExit):
