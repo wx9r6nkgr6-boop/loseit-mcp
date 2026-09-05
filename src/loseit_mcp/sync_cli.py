@@ -41,6 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--import-enrichment", type=Path, help="Import one reviewed enrichment JSON document."
     )
+    parser.add_argument("--coverage", action="store_true", help="Report local nutrition coverage only.")
+    parser.add_argument("--json", action="store_true", help="Emit coverage as JSON.")
+    parser.add_argument("--missing-only", action="store_true", help="Only show foods with coverage gaps.")
     return parser
 
 
@@ -78,6 +81,20 @@ def _load_document(path: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if (args.json or args.missing_only) and not args.coverage:
+            raise ValueError("--json and --missing-only require --coverage")
+        if args.coverage:
+            if (args.show_queue or args.import_enrichment or args.start or args.end
+                    or args.days is not None or args.no_weights):
+                raise ValueError("--coverage cannot be combined with sync, queue, or enrichment options")
+            from .coverage import format_coverage, read_coverage
+
+            report = read_coverage(args.data_dir, missing_only=args.missing_only)
+            print(
+                json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False)
+                if args.json else format_coverage(report)
+            )
+            return 0
         with NutritionRepository(args.data_dir) as repository:
             if args.show_queue:
                 print(json.dumps(repository.unresolved(), indent=2, ensure_ascii=False))

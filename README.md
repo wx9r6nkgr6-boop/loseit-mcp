@@ -197,6 +197,70 @@ estimate cannot overwrite raw JSON or a Lose It! nutrient observation.
 
 ## Enrichment workflow
 
+Before researching foods, inspect the nutrition already present locally:
+
+```bash
+uv run loseit-sync --coverage
+uv run loseit-sync --coverage --json
+uv run loseit-sync --coverage --missing-only --json
+```
+
+Coverage opens the existing `nutrition.sqlite3` with SQLite `mode=ro` and
+`query_only`, in a consistent read transaction. It does not create a repository,
+run migrations, load authentication, sync, research, or contact any service.
+`--data-dir` selects another existing repository. A missing database is an error.
+Coverage cannot be combined with sync, queue, or enrichment-import options.
+
+The target set includes the nine standard nutrients (calories, protein,
+carbohydrates, total fat, saturated fat, fiber, sugar, sodium, cholesterol),
+plus **every additional nutrient key stored in source or estimated observations**.
+Keys and units are preserved; no nutrient is discarded because it is unfamiliar.
+Fields stored as `unknown_nutrient_*` or with `source_unit` units retain those
+labels; their identities and units are not inferred. These fields participate
+in full-target coverage and priority. A separate `standard_source_complete`
+flag and summary count identify foods complete for the nine named nutrients.
+Each nutrient reports counts, occurrence percentages, and missing counts for:
+
+- `source_reported`: finite Lose It! observations, including explicit zeros.
+- `estimated_or_enriched`: existing occurrence links to the latest reference
+  version, with a finite estimate or valid finite bounds. Bounds-only coverage
+  and estimates that fill source gaps are reported separately. Older versions,
+  unlinked references, and fuzzy suggestions do not count.
+- `combined_usable`: the union of those occurrences, without double-counting.
+
+This measures information availability, not nutritional adequacy or accuracy.
+Linked estimates may be low-confidence or unreviewed; per-food reference status
+shows confidence and review coverage. The current reference model does not
+encode a validated portion conversion, so this report does not scale estimates,
+compute nutrient totals, or imply that linked estimates equal consumed amounts.
+Missing observations stay missing; absent values never become zeros.
+
+Calorie-weighted coverage means the percentage of **source-reported calories**
+belonging to occurrences with that nutrient available. It is emitted only when
+every occurrence in the relevant group has finite, nonnegative source calories
+and their sum is positive. Otherwise JSON contains `null` and an explanation;
+terminal output shows `n/a`. Empty-database occurrence percentages are also `null`.
+
+Per-food groups use source and stable source food ID; without an ID they use
+source, normalized name, and brand. Distinct IDs are never merged just because names
+match. The last stored occurrence supplies the display name when an ID has
+name variants. Every target nutrient includes source/estimate/combined counts,
+so partial coverage across repeated occurrences remains visible.
+
+Foods sort by **occurrence frequency × average number of combined missing target
+nutrients**, equivalent to the count of missing occurrence–nutrient slots.
+This is a practical research-priority heuristic, not a scientific score. The
+missing-nutrient count is the number of target fields missing on at least one
+occurrence. `--missing-only` filters that per-food list; overall coverage totals
+still describe the entire database. JSON includes full per-food measures and
+definitions for a subsequent ChatGPT research step, without dates, meals,
+account identifiers, entry identifiers, credentials, or raw diary snapshots.
+
+**Unresolved enrichment status is independent of nutrition coverage.** It means
+there is no high-confidence cached reference, not that source nutrition is
+incomplete. A food can be unresolved and still have 100% source and combined
+coverage. Coverage neither edits the queue nor creates estimates.
+
 Synchronization never browses the web. Review the queue:
 
 ```bash
