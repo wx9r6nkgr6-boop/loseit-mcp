@@ -42,7 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--import-enrichment", type=Path, help="Import one reviewed enrichment JSON document."
     )
     parser.add_argument("--coverage", action="store_true", help="Report local nutrition coverage only.")
-    parser.add_argument("--json", action="store_true", help="Emit coverage as JSON.")
+    parser.add_argument("--research-queue", action="store_true", help="Report standard nutrient research gaps locally.")
+    parser.add_argument("--json", action="store_true", help="Emit coverage or research queue as JSON.")
     parser.add_argument("--missing-only", action="store_true", help="Only show foods with coverage gaps.")
     return parser
 
@@ -81,8 +82,20 @@ def _load_document(path: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if (args.json or args.missing_only) and not args.coverage:
-            raise ValueError("--json and --missing-only require --coverage")
+        if args.json and not (args.coverage or args.research_queue):
+            raise ValueError("--json requires --coverage or --research-queue")
+        if args.missing_only and not args.coverage:
+            raise ValueError("--missing-only requires --coverage")
+        if args.research_queue:
+            if (args.coverage or args.show_queue or args.import_enrichment or args.start or args.end
+                    or args.days is not None or args.no_weights or args.missing_only):
+                raise ValueError("--research-queue cannot be combined with other modes or sync options")
+            from .research_queue import format_research_queue, read_research_queue
+
+            report = read_research_queue(args.data_dir)
+            print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False)
+                  if args.json else format_research_queue(report))
+            return 0
         if args.coverage:
             if (args.show_queue or args.import_enrichment or args.start or args.end
                     or args.days is not None or args.no_weights):

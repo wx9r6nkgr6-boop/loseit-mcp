@@ -25,7 +25,7 @@ def read_coverage(data_dir: Path, *, missing_only: bool = False) -> dict[str, An
         connection.execute("PRAGMA query_only=ON")
         connection.execute("BEGIN")  # One consistent snapshot, including committed WAL data.
         version = connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        if version != SCHEMA_VERSION:
+        if version not in range(1, SCHEMA_VERSION + 1):
             raise ValueError(f"Coverage requires database schema {SCHEMA_VERSION}; found {version}")
         return _report(connection, missing_only=missing_only)
     finally:

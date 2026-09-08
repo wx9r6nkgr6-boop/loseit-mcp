@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Self
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SOURCE = "loseit"
 STANDARD_NUTRIENTS = (
     "calories",
@@ -223,6 +223,22 @@ MIGRATIONS = (
         FROM enrichment_versions GROUP BY reference_id
     ) latest ON latest.reference_id=ev.reference_id AND latest.version=ev.version;
     """,
+    """
+    CREATE TABLE source_reference_targets (
+        source TEXT NOT NULL,
+        source_food_id TEXT NOT NULL,
+        food_name_normalized TEXT NOT NULL,
+        brand_normalized TEXT NOT NULL,
+        reference_id INTEGER NOT NULL REFERENCES food_references(id),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(source, source_food_id, food_name_normalized, brand_normalized)
+    );
+    CREATE TABLE enrichment_review_contexts (
+        enrichment_version_id INTEGER PRIMARY KEY REFERENCES enrichment_versions(id),
+        source_context_json TEXT NOT NULL,
+        nutrition_basis_json TEXT NOT NULL
+    );
+    """,
 )
 
 
@@ -376,7 +392,7 @@ class NutritionRepository:
         name_raw = str(entry.get("food_name") or "")
         brand_raw = str(entry.get("food_brand") or "")
         previous = self.connection.execute(
-            """SELECT id,food_name_normalized,brand_normalized
+            """SELECT id,food_name_normalized,brand_normalized,source_food_id
                FROM food_occurrences WHERE stable_key=?""",
             (stable_key,),
         ).fetchone()
@@ -413,6 +429,7 @@ class NutritionRepository:
         if previous is not None and (
             previous["food_name_normalized"] != normalize_text(name_raw)
             or previous["brand_normalized"] != normalize_text(brand_raw)
+            or previous["source_food_id"] != entry.get("food_id")
         ):
             self.connection.execute(
                 "DELETE FROM occurrence_reference_links WHERE occurrence_id=?",
@@ -453,8 +470,22 @@ class NutritionRepository:
         ).fetchone():
             return 1, 0
         name, brand = occurrence["food_name_normalized"], occurrence["brand_normalized"]
+        target = self.connection.execute(
+            """SELECT reference_id FROM source_reference_targets
+               WHERE source=? AND source_food_id=? AND food_name_normalized=? AND brand_normalized=?""",
+            (SOURCE, occurrence["source_food_id"], name, brand),
+        ).fetchone()
+        if target is not None:
+            self.connection.execute(
+                """INSERT INTO occurrence_reference_links
+                   (occurrence_id,reference_id,match_method,confidence,linked_at)
+                   VALUES (?,?,'source_food_id','high',?)""",
+                (occurrence["id"], target["reference_id"], _now()),
+            )
+            return 1, 0
         reference = self.connection.execute(
-            "SELECT id FROM food_references WHERE food_name_normalized=? AND brand_normalized=?",
+            """SELECT id FROM food_references WHERE food_name_normalized=? AND brand_normalized=?
+               AND id NOT IN (SELECT reference_id FROM source_reference_targets)""",
             (name, brand),
         ).fetchone()
         method = "exact_normalized_name_brand"
@@ -466,6 +497,10 @@ class NutritionRepository:
                 (name, brand),
             ).fetchone()
             method = "manually_confirmed_alias"
+            if reference is not None and self.connection.execute(
+                "SELECT 1 FROM source_reference_targets WHERE reference_id=?", (reference["id"],)
+            ).fetchone():
+                reference = None
         if reference is not None:
             self.connection.execute(
                 """INSERT OR IGNORE INTO occurrence_reference_links
@@ -518,6 +553,9 @@ class NutritionRepository:
 
     def import_enrichment(self, document: dict[str, Any]) -> dict[str, Any]:
         """Append a researched version; never edit source observations."""
+        from .research_queue import validate_import_target
+
+        target, context = validate_import_target(self.connection, document)
         name = str(document.get("food_name") or "").strip()
         brand = str(document.get("brand") or "").strip()
         if not name:
@@ -549,6 +587,33 @@ class NutritionRepository:
                 (normalize_text(name), normalize_text(brand)),
             ).fetchone()
             assert reference is not None
+            bound = self.connection.execute(
+                "SELECT * FROM source_reference_targets WHERE reference_id=?", (reference["id"],)
+            ).fetchall()
+            if bound and (target is None or any(r["source_food_id"] != target for r in bound)):
+                raise ValueError("Reference is bound to a different source food ID; explicit review required")
+            if target is not None:
+                foreign_links = self.connection.execute(
+                    """SELECT 1 FROM occurrence_reference_links l JOIN food_occurrences o
+                       ON o.id=l.occurrence_id WHERE l.reference_id=?
+                       AND (o.source!=? OR COALESCE(o.source_food_id,'')!=?)""",
+                    (reference["id"], SOURCE, target),
+                ).fetchone()
+                if foreign_links:
+                    raise ValueError("Reference already links other source foods; explicit review required")
+                if document.get("aliases"):
+                    raise ValueError("ID-targeted imports cannot add name-only aliases")
+                existing = self.connection.execute(
+                    "SELECT reference_id FROM source_reference_targets WHERE source=? AND source_food_id=?",
+                    (SOURCE, target),
+                ).fetchall()
+                if existing and any(r[0] != reference["id"] for r in existing):
+                    raise ValueError("Source identity conflicts with a prior reference; explicit review required")
+                self.connection.execute(
+                    """INSERT OR IGNORE INTO source_reference_targets
+                       VALUES (?,?,?,?,?,?)""",
+                    (SOURCE, target, normalize_text(name), normalize_text(brand), reference["id"], _now()),
+                )
             row = self.connection.execute(
                 "SELECT COALESCE(MAX(version),0)+1 AS version FROM enrichment_versions WHERE reference_id=?",
                 (reference["id"],),
@@ -564,6 +629,11 @@ class NutritionRepository:
                  int(bool(document.get("manually_reviewed"))), _now()),
             )
             enrichment_id = int(cursor.lastrowid)
+            if target is not None:
+                self.connection.execute(
+                    "INSERT INTO enrichment_review_contexts VALUES (?,?,?)",
+                    (enrichment_id, _json(context), _json(document["nutrition_basis"])),
+                )
             for item in nutrients:
                 provenance = str(item.get("provenance") or "")
                 if provenance not in PROVENANCE_TYPES:
@@ -595,7 +665,20 @@ class NutritionRepository:
                 )
                 if confirmed:
                     self._link_existing_alias(int(reference["id"]), alias_name, alias_brand)
-            self._link_existing_reference(int(reference["id"]), normalize_text(name), normalize_text(brand))
+            if target is None:
+                self._link_existing_reference(int(reference["id"]), normalize_text(name), normalize_text(brand))
+            else:
+                self.connection.execute(
+                    """INSERT INTO occurrence_reference_links
+                       (occurrence_id,reference_id,match_method,confidence,linked_at)
+                       SELECT id,?,'source_food_id',?,? FROM food_occurrences
+                       WHERE source=? AND source_food_id=? AND food_name_normalized=? AND brand_normalized=?
+                       ON CONFLICT(occurrence_id) DO UPDATE SET reference_id=excluded.reference_id,
+                         match_method=excluded.match_method,confidence=excluded.confidence,
+                         linked_at=excluded.linked_at""",
+                    (reference["id"], confidence, _now(), SOURCE, target,
+                     normalize_text(name), normalize_text(brand)),
+                )
         return {"reference_id": int(reference["id"]), "version": version,
                 "nutrient_count": len(nutrients)}
 
@@ -615,6 +698,10 @@ class NutritionRepository:
         )
 
     def _link_existing_alias(self, reference_id: int, name: str, brand: str) -> None:
+        if self.connection.execute(
+            "SELECT 1 FROM source_reference_targets WHERE reference_id=?", (reference_id,)
+        ).fetchone():
+            raise ValueError("A source-ID reference cannot be applied by a name-only alias")
         now = _now()
         self.connection.execute(
             """INSERT OR IGNORE INTO occurrence_reference_links

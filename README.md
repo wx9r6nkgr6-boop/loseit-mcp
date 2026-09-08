@@ -292,6 +292,94 @@ manually confirmed aliases are auto-applied. Fuzzy matches are suggestions in
 the queue and never silently linked. Importing a newer reference creates a new
 version rather than destroying prior provenance.
 
+## Compact research queue: repeatable local workflow
+
+```bash
+# Normal sync is the only step here that contacts Lose It! (read-only).
+uv run loseit-sync --days 7
+uv run loseit-sync --coverage                       # optional audit
+uv run loseit-sync --research-queue                 # concise terminal summary
+uv run loseit-sync --research-queue --json > nutrition_research_queue.json
+# Upload that JSON to ChatGPT for deliberate research outside this program.
+# Review its product match, label basis, evidence and proposed values, then:
+uv run loseit-sync --import-enrichment /private/path/reviewed-food.json
+uv run loseit-sync --research-queue
+```
+
+Repeat manually, weekly or monthly; no scheduler is installed. The research
+queue itself opens SQLite in read-only/query-only mode, does not load credentials,
+contact any service, migrate the database, or write enrichment. The JSON export
+contains food information: keep it private. Its default filename is gitignored.
+
+Only these nine fields drive research: `calories`, `protein_g`, `carb_g`,
+`total_fat_g`, `saturated_fat_g`, `fiber_g`, `sugar_g`, `sodium_mg`,
+`cholesterol_mg`. Unknown fields remain unchanged in SQLite and `--coverage`,
+but never enter this queue or its score. Missing is not zero; finite zero is
+present. An unresolved general-cache item can have complete standard nutrition
+and will then be omitted here.
+
+JSON schema version 1 has `local_only`, `queue_count`, `standard_nutrients`,
+`lifecycle_counts`, `rules`, and a sorted `foods` array. Each food includes:
+
+- Stable `source_food_id` (or null), normalized `food_name`/`brand`, raw names,
+  occurrence count, first/last seen dates, reference and general-cache status.
+- Actual finite `source_nutrients` when identical across occurrences; otherwise
+  null, with every distinct set in `portion_variants`. Variants retain logged
+  amount/unit/servings, retained serving description, source values and count.
+- `source_serving: null` and `source_basis_status`: current stored snapshots do
+  not retain a reliable original label basis. Values are copied exactly, never
+  divided by logged quantity or presented as an invented per-serving label.
+- Source-missing and combined-missing standard fields, per-field missing
+  occurrence counts, `priority_score`, matching status and `import_target`.
+
+Priority is **occurrence count × distinct missing standard fields**, descending,
+with deterministic ties. This is a practical heuristic, not a scientific score.
+No product identity, UPC or external match is inferred from a brand string.
+
+Lifecycle is derived each run: `needs_research`, `partially_filled`, `needs_review`,
+or `complete` (counted but omitted from the worklist). Reuse requires the latest
+linked version to be manually reviewed, high confidence, and an exact branded
+or authoritative generic match, or a manually confirmed alias. An
+`insufficient_information` match is never trusted. Low-confidence/unreviewed
+references remain visible as needing review. Finite estimates or valid bounds
+fill availability gaps, without overwriting source values. This queue deliberately
+uses stricter reuse rules than the all-estimates audit in `--coverage`.
+Availability does not certify portion-normalized nutrient totals.
+
+### Reviewed import round-trip
+
+Use the existing single-food `examples/enrichment.json` format: preserve its
+required match type, confidence, source references, research date, assumptions,
+manual review flag and per-nutrient provenance. Replace example values only
+after research and human review. For a stable-ID queue item:
+
+1. Copy its entire `import_target` object unchanged into the document's `target`
+   field; keep its `food_name` and `brand`.
+2. Add `nutrition_basis` with a positive numeric `amount`, explicit string `unit`,
+   and nonempty `description` documenting the actually reviewed nutrition label
+   basis. This is retained with the version, not used for guessed conversions.
+3. Provide researched nutrient records in `nutrients`; never convert unknowns or
+   missing values to zero. Set `manually_reviewed` to a JSON boolean.
+4. Import one document per food, then regenerate the queue. Every new version
+   replaces the prior version for reuse, so retain all still-valid reviewed
+   nutrients, not just the newest additions. Older versions remain intact.
+
+The target includes a source-context fingerprint. A stale export with changed
+source values/portions is rejected before import writes; export again and review.
+Repeated unchanged contexts do not invalidate it. Future occurrences of the
+same ID and normalized identity reuse the reference, even at different logged
+quantities; conflicting values at identical portions or changed identity require
+review. A source-ID reference cannot silently spread through name-only matches
+or aliases to another ID. The existing unique name/brand reference model also
+rejects binding an already-bound reference to a second ID, or retargeting a
+reference linked to other foods. Such collisions need explicit resolution, not
+an automatic merge. No-ID foods retain conservative name/brand imports and
+explicitly confirmed aliases; no stable target is fabricated.
+
+Schema 2 adds append-only review context and source-target tables on a future
+explicit writable sync/import. Both reporting modes still read schema 1 without
+migrating it. No MCP tools or remote write capabilities are added.
+
 ## Analysis readiness
 
 The schema supports calories/macros and other nutrient averages, meal-level
