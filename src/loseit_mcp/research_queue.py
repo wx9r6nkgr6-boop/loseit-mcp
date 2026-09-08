@@ -10,7 +10,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from .repository import PROVENANCE_TYPES, SCHEMA_VERSION, STANDARD_NUTRIENTS, normalize_text
+from .repository import (
+    PROVENANCE_TYPES,
+    SCHEMA_VERSION,
+    STANDARD_NUTRIENTS,
+    current_filter,
+    normalize_text,
+)
 
 EXACT_MATCHES = {"exact_brand_product", "USDA_or_other_authoritative_generic"}
 
@@ -45,7 +51,7 @@ def _groups(connection: sqlite3.Connection) -> list[dict[str, Any]]:
             observations[row["occurrence_id"]][row["nutrient"]] = row["value"]
     groups: dict[tuple, dict] = {}
     snapshots: dict[int, dict] = {}
-    for row in connection.execute("SELECT * FROM food_occurrences ORDER BY id"):
+    for row in connection.execute("SELECT * FROM food_occurrences" + current_filter(connection) + " ORDER BY id"):
         key = (
             (row["source"], "id", row["source_food_id"])
             if row["source_food_id"]

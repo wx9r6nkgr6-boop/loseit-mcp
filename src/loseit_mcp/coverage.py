@@ -9,7 +9,7 @@ from pathlib import Path
 from textwrap import fill
 from typing import Any
 
-from .repository import PROVENANCE_TYPES, SCHEMA_VERSION, STANDARD_NUTRIENTS
+from .repository import PROVENANCE_TYPES, SCHEMA_VERSION, STANDARD_NUTRIENTS, current_filter
 
 
 def _finite(value: Any) -> bool:
@@ -35,7 +35,7 @@ def read_coverage(data_dir: Path, *, missing_only: bool = False) -> dict[str, An
 def _report(connection: sqlite3.Connection, *, missing_only: bool) -> dict[str, Any]:
     rows = connection.execute(
         "SELECT id,source,source_food_id,food_name_normalized,brand_normalized "
-        "FROM food_occurrences ORDER BY id"
+        "FROM food_occurrences" + current_filter(connection) + " ORDER BY id"
     ).fetchall()
     ids = {row["id"] for row in rows}
     source: dict[str, set[int]] = defaultdict(set)

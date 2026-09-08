@@ -8,6 +8,7 @@ object; they receive this facade, whose public API contains reads only.
 from __future__ import annotations
 
 from datetime import date, timedelta
+from time import sleep
 from typing import Any, Self
 
 from .config import Settings
@@ -59,7 +60,7 @@ class ReadOnlyLoseItService:
     def get_diary(self, when: str | date | None = None) -> dict[str, Any]:
         return self.__delegate.get_diary(when)
 
-    def get_diary_range(self, start_date: str, end_date: str) -> dict[str, Any]:
+    def get_diary_range(self, start_date: str, end_date: str, *, request_delay: float = 0) -> dict[str, Any]:
         """Read each diary day in an inclusive, bounded calendar range."""
         start = _required_iso_date(start_date, "start_date")
         end = _required_iso_date(end_date, "end_date")
@@ -77,6 +78,8 @@ class ReadOnlyLoseItService:
         days: list[dict[str, Any]] = []
         current = start
         while current <= end:
+            if days and request_delay > 0:
+                sleep(request_delay)
             day = self.get_diary(current)
             totals, coverage = _daily_totals(day.get("entries") or [])
             day["daily_totals"] = totals
@@ -134,4 +137,3 @@ def _daily_totals(
             "complete": len(values) == len(entries),
         }
     return totals, coverage
-

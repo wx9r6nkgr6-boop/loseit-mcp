@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Self
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SOURCE = "loseit"
 STANDARD_NUTRIENTS = (
     "calories",
@@ -239,6 +239,25 @@ MIGRATIONS = (
         nutrition_basis_json TEXT NOT NULL
     );
     """,
+    """
+    ALTER TABLE food_occurrences ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1;
+    CREATE TABLE backfill_runs (
+        id INTEGER PRIMARY KEY, year INTEGER NOT NULL, end_date TEXT NOT NULL,
+        status TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT
+    );
+    CREATE TABLE backfill_chunks (
+        run_id INTEGER NOT NULL REFERENCES backfill_runs(id), start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL, status TEXT NOT NULL, summary_json TEXT,
+        PRIMARY KEY(run_id,start_date,end_date)
+    );
+    CREATE VIEW analytics_source_values AS
+    SELECT o.id AS occurrence_id,o.source_date,o.meal,o.source_food_id,
+           n.nutrient,n.value,n.unit FROM food_occurrences o
+    JOIN nutrient_observations n ON n.occurrence_id=o.id WHERE o.is_current=1;
+    CREATE VIEW analytics_daily_source AS
+    SELECT source_date,nutrient,SUM(value) AS known_total,COUNT(*) AS present_count
+    FROM analytics_source_values GROUP BY source_date,nutrient;
+    """,
 )
 
 
@@ -287,12 +306,16 @@ class NutritionRepository:
         for number, sql in enumerate(MIGRATIONS, 1):
             if number <= version:
                 continue
-            with self.connection:
-                self.connection.executescript(sql)
-                self.connection.execute(
-                    "INSERT INTO schema_version(version, applied_at) VALUES (?, ?)",
-                    (number, _now()),
+            # executescript commits pending transactions itself. Put DDL and the
+            # version marker inside its own explicit transaction for crash safety.
+            try:
+                self.connection.executescript(
+                    "BEGIN IMMEDIATE;\n" + sql
+                    + f"\nINSERT INTO schema_version(version,applied_at) VALUES ({number},'{_now()}');\nCOMMIT;"
                 )
+            except Exception:
+                self.connection.rollback()
+                raise
         if version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"Database schema {version} is newer than supported schema {SCHEMA_VERSION}."
@@ -345,12 +368,20 @@ class NutritionRepository:
                 (SOURCE, source_date, digest),
             ).fetchone()
             assert snapshot is not None
+            self.connection.execute(
+                "UPDATE food_occurrences SET is_current=0 WHERE source=? AND source_date=?",
+                (SOURCE, source_date),
+            )
             for position, entry in enumerate(day.get("entries") or []):
                 result["occurrences_seen"] += 1
                 added = self._ingest_occurrence(
                     source_date, position, entry, int(snapshot["id"]), retrieved_at
                 )
                 result["occurrences_added"] += added
+                self.connection.execute(
+                    "UPDATE food_occurrences SET is_current=1 WHERE stable_key=?",
+                    (self._stable_key(source_date, position, entry),),
+                )
                 linked, queued = self._match_or_queue(
                     source_date, position, entry, increment_queue=bool(added)
                 )
@@ -756,7 +787,17 @@ class NutritionRepository:
                     (SOURCE, entry["date"], float(entry["weight"]), entry.get("unit"), retrieved_at),
                 )
                 summary["weights_added"] += self.connection.total_changes - before
+                self.connection.execute(
+                    "UPDATE weight_observations SET weight=?,unit=?,retrieved_at=? WHERE source=? AND source_date=?",
+                    (float(entry["weight"]), entry.get("unit"), retrieved_at, SOURCE, entry["date"]),
+                )
         return summary
+
+
+def current_filter(connection: sqlite3.Connection) -> str:
+    """Support read-only schema 1/2 reports without an implicit migration."""
+    columns = {r[1] for r in connection.execute("PRAGMA table_info(food_occurrences)")}
+    return " WHERE is_current=1" if "is_current" in columns else ""
 
 
 def normalize_text(value: str) -> str:

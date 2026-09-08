@@ -45,6 +45,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--research-queue", action="store_true", help="Report standard nutrient research gaps locally.")
     parser.add_argument("--json", action="store_true", help="Emit coverage or research queue as JSON.")
     parser.add_argument("--missing-only", action="store_true", help="Only show foods with coverage gaps.")
+    parser.add_argument("--backfill-year", type=int, help="Resume or refresh one calendar year, capped at local today.")
+    parser.add_argument("--request-delay", type=float, default=1.0, help="Backfill inter-day delay, minimum 0.25 seconds.")
+    parser.add_argument("--chunk-delay", type=float, default=2.0, help="Backfill inter-chunk delay, minimum 0.25 seconds.")
+    parser.add_argument("--analytics", action="store_true", help="Local-only analytics; no authentication or network.")
+    parser.add_argument("--period", choices=["last7", "last14", "last30", "week", "month", "ytd"])
+    parser.add_argument("--group-foods", choices=["id", "name"], default="id")
+    parser.add_argument("--protein-target", type=float)
+    parser.add_argument("--calorie-min", type=float)
+    parser.add_argument("--calorie-max", type=float)
     return parser
 
 
@@ -63,7 +72,7 @@ def _range(args: argparse.Namespace) -> tuple[date, date]:
         days = 7 if args.days is None else args.days
         if days < 1 or days > MAX_DIARY_RANGE_DAYS:
             raise ValueError(f"--days must be between 1 and {MAX_DIARY_RANGE_DAYS}")
-        end = datetime.now(UTC).date()
+        end = date.today()  # noqa: DTZ011 - source calendar uses local dates
         start = end - timedelta(days=days - 1)
     if end < start:
         raise ValueError(f"start {start} is after end {end}")
@@ -82,8 +91,39 @@ def _load_document(path: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.json and not (args.coverage or args.research_queue):
-            raise ValueError("--json requires --coverage or --research-queue")
+        modes = [args.coverage, args.research_queue, args.analytics, args.backfill_year is not None,
+                 args.show_queue, args.import_enrichment is not None]
+        if sum(bool(m) for m in modes) > 1:
+            raise ValueError("Choose exactly one reporting, import, or backfill mode")
+        if not args.analytics and (args.period or args.protein_target is not None or args.calorie_min is not None or args.calorie_max is not None or args.group_foods != "id"):
+            raise ValueError("Analytics options require --analytics")
+        if args.json and not (args.coverage or args.research_queue or args.analytics or args.backfill_year is not None):
+            raise ValueError("--json requires a report or backfill mode")
+        if args.analytics:
+            if args.no_weights or args.missing_only or (args.period and (args.days is not None or args.start or args.end)):
+                raise ValueError("Conflicting analytics options")
+            from .analytics import format_analytics, period_dates, read_analytics
+
+            start, end = period_dates(period=args.period or f"last{args.days if args.days is not None else 7}",
+                                      start=date.fromisoformat(args.start) if args.start else None,
+                                      end=date.fromisoformat(args.end) if args.end else None)
+            report = read_analytics(args.data_dir, start, end, period=args.period or "custom",
+                                    grouping=args.group_foods, protein_target=args.protein_target,
+                                    calorie_min=args.calorie_min, calorie_max=args.calorie_max)
+            print(json.dumps(report, ensure_ascii=False, allow_nan=False, separators=(",", ":")) if args.json else format_analytics(report))
+            return 0
+        if args.backfill_year is not None:
+            if args.start or args.end or args.days is not None or args.no_weights or args.missing_only:
+                raise ValueError("Backfill always includes matching weights and its own year date range")
+            from .backfill import backfill, year_chunks
+
+            year_chunks(args.backfill_year)  # Validate before opening writable storage/auth.
+            with NutritionRepository(args.data_dir) as repository, ReadOnlyLoseItService(load_settings()) as service:
+                report = backfill(repository, service, args.backfill_year,
+                                  request_delay=args.request_delay, chunk_delay=args.chunk_delay,
+                                  progress=lambda message: print(message, file=sys.stderr, flush=True))
+            print(json.dumps(report, ensure_ascii=False, allow_nan=False, indent=None if args.json else 2))
+            return 0 if report["status"] == "complete" else 2
         if args.missing_only and not args.coverage:
             raise ValueError("--missing-only requires --coverage")
         if args.research_queue:

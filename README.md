@@ -380,6 +380,160 @@ Schema 2 adds append-only review context and source-target tables on a future
 explicit writable sync/import. Both reporting modes still read schema 1 without
 migrating it. No MCP tools or remote write capabilities are added.
 
+## Historical backfill (2026 now; other years explicitly later)
+
+```bash
+uv run loseit-mcp compatibility-check
+uv run loseit-mcp whoami
+uv run loseit-mcp status
+uv run loseit-sync --backfill-year 2026
+uv run loseit-sync --backfill-year 2026 --json > nutrition_private_reports/backfill_2026.json
+```
+
+Create private output directories first if using redirection. Backfill processes
+January 1 through December 31 of the requested year, capped at **local today**.
+It never requests dates in another year. Older years use the same explicit
+`--backfill-year YEAR` command; none are selected automatically. Future years
+are rejected. There is no source API for a guaranteed latest available diary
+date: empty responses through today are retained as retrieved-but-unlogged days.
+
+Chunks contain at most 31 inclusive calendar days. They run sequentially through
+the existing read-only diary-range and matching weight-history paths. Defaults
+are **1 second between diary requests**, 1 second before weights, and **2 seconds
+before each chunk**. `--request-delay` and `--chunk-delay` can tune these; each
+must be finite and at least 0.25 seconds. Existing transport retries and weight
+decoder subdivisions remain bounded. No uncontrolled retries, concurrency or
+automatic GWT configuration refresh is added. Progress goes to stderr, so stdout
+remains valid JSON.
+
+Schema 3 stores `backfill_runs` and `backfill_chunks`. A chunk becomes complete
+only after its complete date set and matching weights have been validated and
+persisted. After failure, Ctrl-C, termination or restart, rerun the same command:
+completed chunks in that unfinished pass are skipped. A process-level lock
+prevents two backfills from operating on one repository simultaneously. Do not
+run ordinary sync/import concurrently with backfill.
+
+An entirely completed pass is **refreshed on the next invocation**, rather than
+making historical days immutable. If today advances during recovery, the new
+tail is fetched as well. Identical source snapshots are deduplicated; changed
+service-response payloads retain separate raw snapshots. Stable-ID occurrences
+are upserted; removed/replaced occurrences are marked noncurrent rather than
+destroyed. Coverage, research and analytics exclude these noncurrent rows.
+Without source entry IDs, the existing snapshot-position/content identity is
+retained, with superseded rows noncurrent. Weight corrections update current
+normalized weights while raw weight history remains intact. Raw snapshots are
+the exact existing service-level JSON projection, not original GWT wire bytes.
+
+Compatibility or serialization drift stops the pass and recommends
+`uv run loseit-mcp compatibility-check`. It never rewrites configuration. Only
+safe error types and recovery instructions are saved, not exception payloads or
+credentials. Reports include requested/actual dates, completed/skipped/failed
+chunks, diary/occurrence/raw/weight counters, standard coverage, research queue
+count and database path. Counters describe completed chunks in this pass,
+including resumed checkpoints; partial writes from an interrupted chunk are
+idempotently reconciled on retry and are not a transaction-wide change audit.
+
+## Local analytics API and exports
+
+```bash
+uv run loseit-sync --analytics --days 7
+uv run loseit-sync --analytics --days 14 --json
+uv run loseit-sync --analytics --days 30 --json
+uv run loseit-sync --analytics --period week --json
+uv run loseit-sync --analytics --period month --json
+uv run loseit-sync --analytics --period ytd --json
+uv run loseit-sync --analytics --start 2026-01-01 --end 2026-03-31 --json
+# Optional explicitly chosen targets; no personal defaults exist:
+uv run loseit-sync --analytics --days 7 --protein-target 100 --calorie-min 1800 --calorie-max 2200
+# Separate opt-in name+brand grouping (default is stable source food ID):
+uv run loseit-sync --analytics --days 30 --group-foods name --json
+```
+
+The example targets illustrate syntax only, not recommendations. All analytics
+commands use SQLite read-only/query-only snapshots and never load authentication,
+perform migrations, contact Lose It!, research food or write nutrition. Relative
+windows use the local machine date; source dates are already local calendar
+dates and are not reinterpreted as UTC. Calendar week is Monday through today;
+calendar month and YTD end today. Custom dates are inclusive. Week/month bucket
+summaries are clipped to the selected period. Comparisons use an equally long
+preceding window; month mode uses the corresponding prior-month-to-date window,
+capped at that month's end. Comparisons are local queries, never extra ingestion.
+
+`analytics.read_analytics(data_dir, start, end, ...)` is the UI-independent service.
+Schema 3 also provides `analytics_source_values` and `analytics_daily_source`
+SQL views for current source observations. The Python service computes coverage,
+portion-aware enrichment, calendar grouping, rankings and trends; future clients
+should call it rather than duplicating those rules. Schema 1/2 databases remain
+readable without migration; the views are installed on explicit writable use.
+
+### Metric definitions and limitations
+
+- Daily nutrient arrays are described by `daily_metric_fields`: source known
+  sum, usable estimated gap-fill sum, combined known sum, source count, estimated
+  count, missing count, and occurrence count. `null` means unavailable, never
+  zero. Partial known sums remain visible with missing counts; source always wins.
+- Logged day means at least one current food occurrence. Retrieved-empty days
+  are not assumed fasting days. Logged-day means require full numeric nutrient
+  coverage across logged days. Calendar-day intake means additionally require
+  every date to be logged. `recorded_contribution_per_calendar_day` is reported
+  separately: it is observed intake divided by calendar days, **not** an estimate
+  of intake on unlogged days. A missing day is not silently assigned zero.
+  `average_per_complete_logged_day` reports a separate complete-day subset mean
+  alongside `complete_logged_days`, so partial periods still have an explicitly
+  limited descriptive statistic rather than an implied complete-period mean.
+- Numeric enrichment requires a reviewed high-confidence eligible reference
+  and an explicit reviewed mapping in `nutrition_basis.occurrence_scaling`:
+  `{"method":"logged_amount","unit":"serving"}`. Its unit must exactly match
+  both the basis and stored occurrence unit. Values scale by logged amount /
+  basis amount. No mapping is inferred from a food name, quantity or calories.
+  Bounds-only or unscaled references can fill research **availability** while
+  remaining unavailable for numeric totals; review flags expose this distinction.
+- Meals preserve original classifications (including unknown/custom labels).
+  Meal averages use distinct logged date/meal groups, not food occurrence count.
+  Nutrient shares are withheld when their overall nutrient total is incomplete.
+- Food ranking uses known combined contributions, with missing counts beside
+  partial totals. Stable food IDs are not merged by similar names. Average
+  portions require one known unit and all finite amounts. JSON indexes a shared
+  top-food catalog to avoid repeating full records in every nutrient ranking.
+- Weight statistics do not interpolate or assume a unit. Change, min/max and
+  average require one known consistent unit. Daily recorded values retain their
+  source unit, including null. Rolling observed-day averages require at least
+  3 observations in 7 calendar days or 7 in 30, may include pre-period observations,
+  and report their observation counts. Unknown/mixed units suppress trends.
+- Consistency uses only complete logged days, population standard deviation and
+  coefficient of variation (null with an unavailable/zero mean). Target adherence
+  reports its eligible complete-day denominator, not an implied all-day rate.
+  Logged-day streaks and missing days remain separate.
+- Percentage comparisons are withheld if either period is incomplete or the
+  prior denominator is zero. Coverage differences remain independently available.
+- Data quality exposes source gaps, safely scaled enrichment, research workflow
+  counts, absent IDs, and review-only source contradictions. Subnutrients exceeding
+  parent nutrients and large calorie/macro discrepancies are heuristics, not
+  corrections or proof of a bad label. No nutrient values are repaired automatically.
+
+### Dashboard and workout-app readiness (no UI or remote integration yet)
+
+The versioned export includes `period`, `logging_completeness`, `daily_metrics`,
+`period_averages`, `weight_summary`, `meal_summary`, `food_contributors`,
+`calendar_summaries`, `nutrient_coverage`, `consistency`, `weekday_weekend`,
+`data_quality` and `comparison`. It omits raw diary snapshots, account metadata
+and credentials. Daily arrays and shared food indexes reduce export size.
+
+A future dashboard can consume these sections directly for overview cards,
+calorie/protein trends, weight chart, macros, meals, food tables, coverage and
+research panels. The research panel should use the existing research queue,
+which remains authoritative for research availability.
+
+`app_summary` is a small projection containing period length, logging completeness,
+calorie/protein/fiber/sugar/sodium averages, protein adherence, weight change and
+three empty insight slots. Request a 7-day period for a 7-day app summary. No
+medical advice or generated conclusions are inserted into those slots. No
+CloudKit, remote API, dashboard framework or workout-app integration is installed.
+
+The workflow remains sync/backfill → optional coverage → research queue → upload
+to ChatGPT for separate research → review/import → rerun queue and analytics.
+Nothing in sync or analytics performs web enrichment.
+
 ## Analysis readiness
 
 The schema supports calories/macros and other nutrient averages, meal-level

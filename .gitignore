@@ -17,6 +17,7 @@ data/*
 *.sqlite3-shm
 *.sqlite3-wal
 nutrition_research_queue.json
+nutrition_private_reports/
 
 # Deployment notes containing real Azure resource names
 DEPLOYMENT-PRIVATE.md
