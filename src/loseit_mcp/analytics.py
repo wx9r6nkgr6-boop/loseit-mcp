@@ -167,6 +167,12 @@ def _prepare(c):
                                 estimate["estimated_value"] * factor
                             )
             records.append(row)
+    if _table(c, "source_review_flags"):
+        flags = {r["source_food_id"]:r["status"] for r in c.execute("SELECT * FROM source_review_flags ORDER BY id")}
+        for row in records:
+            status = flags.get(row["source_food_id"])
+            if status and status != "cleared":
+                row["quality_flags"].append("manual_source_"+status)
     return records
 
 
@@ -277,7 +283,7 @@ def _meals(rows):
     return result
 
 
-def _foods(rows, grouping):
+def _foods(rows, grouping, include_all=False):
     groups = defaultdict(list)
     for row in rows:
         key = (
@@ -321,6 +327,8 @@ def _foods(rows, grouping):
         + [f for ranking in ranks.values() for f in ranking if f not in foods[:10]]
         + flagged[:20]
     )
+    if include_all:
+        catalog = foods
     unique = []
     for f in catalog:
         if f not in unique:
@@ -420,6 +428,10 @@ def read_analytics(
     protein_target=None,
     calorie_min=None,
     calorie_max=None,
+    fiber_target=None,
+    sodium_limit=None,
+    sugar_target=None,
+    include_all_foods=False,
 ):
     if end < start or (end - start).days > 3660:
         raise ValueError("Analytics period must be ordered and at most 3661 days")
@@ -428,7 +440,7 @@ def read_analytics(
     if (
         any(
             v is not None and (not _finite(v) or v < 0)
-            for v in (protein_target, calorie_min, calorie_max)
+            for v in (protein_target, calorie_min, calorie_max, fiber_target, sodium_limit, sugar_target)
         )
         or ((calorie_min is None) != (calorie_max is None))
         or (calorie_min is not None and calorie_min > calorie_max)
@@ -456,7 +468,7 @@ def read_analytics(
         retrieved = {
             r[0] for r in c.execute("SELECT DISTINCT source_date FROM raw_diary_snapshots")
         }
-        return _report(
+        report = _report(
             records,
             weights,
             queue,
@@ -470,6 +482,14 @@ def read_analytics(
             calorie_min,
             calorie_max,
         )
+        if include_all_foods:
+            report["food_contributors"] = _foods([r for r in records if start.isoformat() <= r["source_date"] <= end.isoformat()], grouping, include_all=True)
+        from .insights import generate_insights, target_adherence
+
+        report["additional_target_adherence"] = target_adherence(report, {"fiber_target":fiber_target, "sodium_limit":sodium_limit, "sugar_target":sugar_target})
+        report["insights"] = generate_insights(report)
+        report["app_summary"]["insight_slots"] = report["insights"]
+        return report
     finally:
         c.close()
 

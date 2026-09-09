@@ -17,11 +17,13 @@ dependencies = [
     "httpx>=0.28.1",
     "python-dotenv>=1.0.1",
     "cryptography>=49.0.0",
+    "streamlit>=1.50,<2",
 ]
 
 [project.scripts]
 loseit-mcp = "loseit_mcp.cli:main"
 loseit-sync = "loseit_mcp.sync_cli:main"
+loseit-dashboard = "loseit_mcp.dashboard_cli:main"
 
 [build-system]
 requires = ["hatchling>=1.25"]
@@ -48,4 +50,3 @@ addopts = "-q"
 
 [tool.ruff]
 line-length = 100
-

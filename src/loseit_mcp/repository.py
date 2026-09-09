@@ -7,12 +7,13 @@ import json
 import re
 import sqlite3
 import unicodedata
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Self
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SOURCE = "loseit"
 STANDARD_NUTRIENTS = (
     "calories",
@@ -257,6 +258,36 @@ MIGRATIONS = (
     CREATE VIEW analytics_daily_source AS
     SELECT source_date,nutrient,SUM(value) AS known_total,COUNT(*) AS present_count
     FROM analytics_source_values GROUP BY source_date,nutrient;
+    """,
+    """
+    CREATE TABLE research_proposals (
+        id INTEGER PRIMARY KEY, content_sha256 TEXT NOT NULL UNIQUE,
+        source_food_id TEXT NOT NULL, document_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_proposals_food ON research_proposals(source_food_id);
+    CREATE TABLE proposal_reviews (
+        id INTEGER PRIMARY KEY, proposal_id INTEGER NOT NULL REFERENCES research_proposals(id),
+        action TEXT NOT NULL, document_json TEXT, selected_json TEXT NOT NULL DEFAULT '[]',
+        user_edited INTEGER NOT NULL DEFAULT 0, enrichment_version_id INTEGER REFERENCES enrichment_versions(id),
+        note TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_reviews_proposal ON proposal_reviews(proposal_id,id);
+    CREATE TABLE source_review_flags (
+        id INTEGER PRIMARY KEY, source_food_id TEXT NOT NULL, status TEXT NOT NULL,
+        note TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_source_review_food ON source_review_flags(source_food_id,id);
+    CREATE TABLE dashboard_settings_versions (
+        id INTEGER PRIMARY KEY, settings_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER proposals_no_update BEFORE UPDATE ON research_proposals BEGIN SELECT RAISE(ABORT,'Proposal history is append-only'); END;
+    CREATE TRIGGER proposals_no_delete BEFORE DELETE ON research_proposals BEGIN SELECT RAISE(ABORT,'Proposal history is append-only'); END;
+    CREATE TRIGGER reviews_no_update BEFORE UPDATE ON proposal_reviews BEGIN SELECT RAISE(ABORT,'Review history is append-only'); END;
+    CREATE TRIGGER reviews_no_delete BEFORE DELETE ON proposal_reviews BEGIN SELECT RAISE(ABORT,'Review history is append-only'); END;
+    CREATE TRIGGER flags_no_update BEFORE UPDATE ON source_review_flags BEGIN SELECT RAISE(ABORT,'Flag history is append-only'); END;
+    CREATE TRIGGER flags_no_delete BEFORE DELETE ON source_review_flags BEGIN SELECT RAISE(ABORT,'Flag history is append-only'); END;
+    CREATE TRIGGER settings_no_update BEFORE UPDATE ON dashboard_settings_versions BEGIN SELECT RAISE(ABORT,'Settings history is append-only'); END;
+    CREATE TRIGGER settings_no_delete BEFORE DELETE ON dashboard_settings_versions BEGIN SELECT RAISE(ABORT,'Settings history is append-only'); END;
     """,
 )
 
@@ -582,7 +613,7 @@ class NutritionRepository:
                                     "brand": row["brand"], "score": score})
         return sorted(suggestions, key=lambda item: item["score"], reverse=True)[:3]
 
-    def import_enrichment(self, document: dict[str, Any]) -> dict[str, Any]:
+    def import_enrichment(self, document: dict[str, Any], *, manage_transaction: bool = True) -> dict[str, Any]:
         """Append a researched version; never edit source observations."""
         from .research_queue import validate_import_target
 
@@ -605,7 +636,7 @@ class NutritionRepository:
         nutrients = document.get("nutrients")
         if not isinstance(nutrients, list) or not nutrients:
             raise ValueError("nutrients must be a non-empty list")
-        with self.connection:
+        with self.connection if manage_transaction else nullcontext():
             self.connection.execute(
                 """INSERT OR IGNORE INTO food_references
                    (food_name,brand,food_name_normalized,brand_normalized,created_at)

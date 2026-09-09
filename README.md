@@ -534,6 +534,162 @@ The workflow remains sync/backfill → optional coverage → research queue → 
 to ChatGPT for separate research → review/import → rerun queue and analytics.
 Nothing in sync or analytics performs web enrichment.
 
+## Dashboard v1 (localhost only)
+
+```bash
+uv run loseit-dashboard
+# Optional existing repository / unprivileged local port:
+uv run loseit-dashboard --data-dir /private/path/to/repository --port 8501
+```
+
+Open `http://127.0.0.1:8501`. The launcher binds only to loopback, disables
+Streamlit usage telemetry and file watching, keeps CORS/XSRF protection enabled,
+limits uploads to 1 MB, disables static-directory serving and detailed error
+traces, and uses an owner-only umask for new files. Use this launcher rather than
+an unrestricted `streamlit run`. There is no public hosting, external font/chart
+CDN, sync button, background polling, remote API, or nutrition research. Refresh
+reloads local data only. Other local processes/users with access to this machine
+are not isolated by an application login: this is a single-user local tool, not
+a multiuser server. Do not tunnel or reverse-proxy it to a public interface.
+
+Streamlit was chosen to keep the dashboard in the existing Python/uv project:
+its local forms, uploads, tables, charts and AppTest support avoid a separate
+frontend build. The dashboard imports the reusable analytics, research queue,
+proposal and repository services, never Lose It authentication/configuration.
+
+### Sections and date filtering
+
+- **Overview:** logging completeness; calories per logged day; protein and other
+  nutrients per complete-nutrient day with sample sizes; recorded weight; research
+  count; flagged-food count; macro-calorie coverage; factual observations.
+- **Trends:** all nine nutrients, complete daily totals, amber partial-known
+  points, seven-consecutive-complete-day averages and prior-period comparisons.
+  Missing/incomplete dates break complete-value lines. Chart projections come
+  from the reusable insights service, not chart-side arithmetic.
+- **Meals:** original classifications, calories/protein, shares and averages per
+  distinct logged date/meal group. Partial totals retain missing counts.
+- **Foods:** all foods, most frequent, and six contributor rankings; name/brand
+  search; source ID, occurrence count, source/enriched contributions and status.
+  Default grouping preserves distinct source IDs. Optional normalized name/brand
+  grouping is explicit. Search filters the selected table; choose All foods for
+  a repository-period-wide search rather than just a top-ten list.
+- **Weight:** recorded points, latest/count and valid min/max/rolling averages.
+  "Weight unit unavailable from source" is displayed when appropriate. No lb/kg
+  label or interpolation is invented; unit-dependent statistics remain unavailable.
+- **Coverage & Data Quality:** source and numeric combined coverage, missing
+  standard nutrients, enrichment-filled gaps, contradictions and manual flags.
+  Unknown nutrients are tucked behind an explicit advanced-details action.
+- **Review & Enrichment:** research queue, pending proposals, comparisons, review
+  decisions, source annotations and history. Queue counts are repository-wide;
+  contradiction/source selectors use the selected analytics period (YTD for all
+  current 2026 records).
+- **Settings & Targets:** optional protein, calorie range, fiber, sodium upper
+  target and sugar upper target. Empty is unconfigured; there are no personal
+  defaults or recommendations. Adherence uses eligible complete days only.
+
+Presets: last 7/14/30 days, current month, YTD and custom inclusive dates. All
+existing incomplete-data and local-calendar semantics still apply. In particular,
+an unresolved reference is not necessarily missing nutrition. Research
+availability and safely portion-scaled numeric coverage remain distinct.
+
+### File → pending proposal → human decision
+
+1. Run sync/backfill separately and export the standard research queue.
+2. Research outside this application; have ChatGPT produce one proposal per food.
+3. Open Review & Enrichment and upload the local JSON. Click **Import as pending
+   proposal**. Upload alone never calls the approved-enrichment importer.
+4. Inspect Needs Review or Ready to Approve. Compare stored source/context with
+   proposed values, evidence, assumptions, uncertainty and nutrition basis.
+5. Optionally edit the JSON and select only the nutrients to approve. Confirm
+   product/evidence/units/basis verification. Conflicting proposals require a
+   separate explicit acknowledgement; stale source contexts remain blocked.
+6. Approve selected nutrients, reject, or defer. Successful decisions rerun the
+   dashboard, immediately refreshing local analytics and queue state.
+
+Approval creates a reviewed enrichment version through the existing stable-ID
+importer, in the **same SQLite transaction** as the review event. It never
+overwrites source nutrition. Source values still take precedence over estimates.
+Partial approvals preserve compatible previously reviewed nutrients; remaining
+proposal nutrients stay pending. Carrying prior nutrients across changed evidence,
+confidence, assumptions, research date or portion basis is blocked rather than
+silently relabelling their provenance. Use a fully reviewed replacement in that
+case. Reject/defer never add nutrients. Duplicate exact proposals return the
+existing proposal ID; conflicting overlapping proposals are flagged.
+
+Edits and every decision retain their document, selected nutrients, note,
+timestamp and user-edited marker. Proposal originals are immutable. History
+shows review events plus enrichment versions with nutrient-level provenance.
+Finalized approvals/rejections cannot be replayed; submit a new proposal for
+later revisions. Existing command-line enrichment import remains available and
+unchanged in purpose, but it is an **approved import**, not the pending UI workflow.
+
+For contradictions, Needs Review shows stored portions, source values, current
+flags, proposed mismatch explanations and evidence. Select a source record to
+mark it unreliable, request review, or clear a prior annotation with a reason.
+Annotations are append-only and exposed by analytics; they do not automatically
+alter or suppress source numbers. Source identity/context conflicts that the
+existing conservative importer cannot reconcile must be deferred or rejected,
+not bypassed by checking a confirmation box.
+
+### Proposal JSON v1
+
+See `examples/proposal.schema.json` for the machine-readable structural schema.
+Use one UTF-8 JSON object per file, at most 1 MB, containing:
+
+- `schema_version: 1`
+- `target`: copy the queue's entire `import_target`, including `source: "loseit"`,
+  `source_food_id`, normalized name/brand and `source_context_sha256`.
+- `food_name`, `brand`, `source_reference` (evidence title/name), `reference_url`,
+  `match_type`, `confidence`, `assumptions`, `research_date` (ISO date).
+- `nutrition_basis`: positive `amount`, exact `unit`, explanatory `description`;
+  optional verified `occurrence_scaling` as documented under analytics.
+- `nutrients`: one to nine unique standard nutrient records with `nutrient`,
+  `unit`, `provenance`, and `estimated_value` and/or complete ordered
+  `lower_bound`/`upper_bound`. Units must be kcal for calories, mg for sodium/
+  cholesterol, and g for the other standard nutrients.
+- Optional `notes` and `mismatch_explanation`.
+
+Do not include `manually_reviewed`: the UI sets that only on approval. Unknown
+fields, duplicate JSON keys, unsupported/duplicate nutrients, missing provenance,
+wrong units, negative/nonfinite/string/boolean numeric values, invalid bounds,
+future research dates and credential-bearing/non-HTTP reference URLs are rejected.
+Numeric magnitudes are capped at 1,000,000 per basis as an input safety limit,
+not proof of nutritional plausibility. Human evidence/portion review remains
+necessary. Runtime validation also checks live source ID/context, field equality,
+bound ordering and unit mapping beyond the structural JSON Schema. Missing source
+IDs are rejected; stale/mismatched current contexts are flagged and cannot be
+approved. No-ID foods require separate conservative manual resolution in v1.
+
+Reference URLs are displayed as data and never fetched by the app. Nothing in
+the proposal format claims an external product match has been independently
+verified by this application. Low-confidence approved versions remain labelled
+and are not promoted to authoritative numeric data automatically.
+
+### Persistence, insights and privacy
+
+Schema 4 adds `research_proposals`, `proposal_reviews`, `source_review_flags` and
+`dashboard_settings_versions`. All four are append-only, with SQL triggers
+preventing updates/deletes. Settings store successive local snapshots, not browser
+storage. Schema migration occurs only on an explicit local write action; opening
+dashboard analytics against schema 1–3 remains read-only with no auth requirement.
+
+`insights.generate_insights` produces up to five deterministic factual statements
+using analytics outputs: configured protein adherence, valid prior-period calorie
+changes, complete weekday/weekend comparison, incomplete fiber-day counts, top
+protein contributions and logging completeness. It makes no model/network calls,
+medical diagnoses or coaching recommendations. The same statements now populate
+the existing `app_summary.insight_slots` for a future local workout-app adapter;
+there is no remote integration in v1. Rolling chart values and additional target
+adherence are reusable functions in the same service.
+
+No credentials or raw diary payloads are sent to telemetry or debug logs. Uploaded
+proposals stay local; data is stored in the existing private repository and never
+committed. The launcher's error boundary avoids displaying diary-bearing tracebacks.
+Private reports remain gitignored. Do not approve demonstration/fixture research
+against a real repository. UI tests use isolated fixtures; real verification is
+read-only. Refresh is manual, and another explicit refresh is needed after an
+external sync or CLI import. No file/drop-folder watcher is installed.
+
 ## Analysis readiness
 
 The schema supports calories/macros and other nutrient averages, meal-level

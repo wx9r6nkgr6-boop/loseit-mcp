@@ -326,7 +326,7 @@ def test_migration_ddl_and_version_are_atomic(tmp_path, monkeypatch):
     assert (
         c.execute("SELECT name FROM sqlite_master WHERE name='should_rollback'").fetchone() is None
     )
-    assert c.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 3
+    assert c.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == module.SCHEMA_VERSION
     c.close()
 
 

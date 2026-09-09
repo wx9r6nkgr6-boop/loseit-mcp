@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Lose It local research proposal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "target", "food_name", "brand", "nutrients", "source_reference", "reference_url", "match_type", "confidence", "assumptions", "nutrition_basis", "research_date"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "source_food_id", "food_name_normalized", "brand_normalized", "source_context_sha256"],
+      "properties": {
+        "source": {"const": "loseit"},
+        "source_food_id": {"$ref": "#/$defs/text"},
+        "food_name_normalized": {"$ref": "#/$defs/text"},
+        "brand_normalized": {"type": "string", "maxLength": 8000},
+        "source_context_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "food_name": {"$ref": "#/$defs/text"},
+    "brand": {"type": "string", "maxLength": 8000},
+    "source_reference": {"$ref": "#/$defs/text"},
+    "reference_url": {"type": "string", "format": "uri", "pattern": "^https?://", "maxLength": 8000},
+    "match_type": {"enum": ["exact_brand_product", "same_brand_close_product", "USDA_or_other_authoritative_generic", "reputable_manufacturer_equivalent", "generic_food_average", "calorie_constrained_inference", "insufficient_information"]},
+    "confidence": {"enum": ["low", "medium", "high"]},
+    "assumptions": {"$ref": "#/$defs/text"},
+    "research_date": {"type": "string", "format": "date"},
+    "notes": {"type": "string", "maxLength": 8000},
+    "mismatch_explanation": {"type": "string", "maxLength": 8000},
+    "nutrition_basis": {
+      "type": "object", "additionalProperties": false,
+      "required": ["amount", "unit", "description"],
+      "properties": {
+        "amount": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+        "unit": {"$ref": "#/$defs/text"},
+        "description": {"$ref": "#/$defs/text"},
+        "occurrence_scaling": {
+          "type": "object", "additionalProperties": false,
+          "required": ["method", "unit"],
+          "properties": {"method": {"const": "logged_amount"}, "unit": {"$ref": "#/$defs/text"}}
+        }
+      }
+    },
+    "nutrients": {"type": "array", "minItems": 1, "maxItems": 9, "items": {"$ref": "#/$defs/nutrient"}}
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 8000},
+    "value": {"type": ["number", "null"], "minimum": 0, "maximum": 1000000},
+    "nutrient": {
+      "type": "object", "additionalProperties": false,
+      "required": ["nutrient", "unit", "provenance"],
+      "properties": {
+        "nutrient": {"enum": ["calories", "protein_g", "carb_g", "total_fat_g", "saturated_fat_g", "fiber_g", "sugar_g", "sodium_mg", "cholesterol_mg"]},
+        "unit": {"enum": ["kcal", "g", "mg"]},
+        "provenance": {"enum": ["researched_exact_product", "researched_brand_equivalent", "researched_generic_food", "inferred_from_calories"]},
+        "estimated_value": {"$ref": "#/$defs/value"},
+        "lower_bound": {"$ref": "#/$defs/value"},
+        "upper_bound": {"$ref": "#/$defs/value"}
+      },
+      "anyOf": [
+        {"required": ["estimated_value"], "properties": {"estimated_value": {"type": "number"}}},
+        {"required": ["lower_bound", "upper_bound"], "properties": {"lower_bound": {"type": "number"}, "upper_bound": {"type": "number"}}}
+      ],
+      "allOf": [
+        {"if": {"properties": {"nutrient": {"const": "calories"}}}, "then": {"properties": {"unit": {"const": "kcal"}}}},
+        {"if": {"properties": {"nutrient": {"enum": ["sodium_mg", "cholesterol_mg"]}}}, "then": {"properties": {"unit": {"const": "mg"}}}},
+        {"if": {"properties": {"nutrient": {"enum": ["protein_g", "carb_g", "total_fat_g", "saturated_fat_g", "fiber_g", "sugar_g"]}}}, "then": {"properties": {"unit": {"const": "g"}}}}
+      ]
+    }
+  }
+}
