@@ -25,6 +25,11 @@ from loseit_mcp.proposals import (
     save_settings,
 )
 from loseit_mcp.research_queue import read_research_queue
+from loseit_mcp.theme import chart_config, css, load_theme
+from loseit_mcp.update import latest_update, run_update
+
+THEME = load_theme()
+COLORS = THEME["colors"]
 
 SECTIONS = [
     "Overview",
@@ -155,18 +160,18 @@ def trends(report):
             "coverage_pct:Q",
         ],
     )
-    complete = base.mark_line(point=True, color="#007f88").encode(
+    complete = base.mark_line(point=True, color=COLORS["accentSecondary"]).encode(
         y=alt.Y("complete_total:Q", title=LABELS[nutrient]), detail="complete_segment:N"
     )
-    rolling = base.mark_line(color="#24497c", strokeDash=[5, 3]).encode(
+    rolling = base.mark_line(color=COLORS["accentPrimary"], strokeDash=[5, 3]).encode(
         y="rolling_7:Q", detail="rolling_segment:N"
     )
-    partial = base.mark_point(color="#b96a12", shape="diamond", size=80).encode(
+    partial = base.mark_point(color=COLORS["warning"], shape="diamond", size=80).encode(
         y="partial_known_total:Q"
     )
     st.altair_chart(complete + rolling + partial, width="stretch")
     st.caption(
-        "Teal: complete daily totals. Amber diamonds: partial known totals, never treated as complete. Dashed: seven consecutive complete days. Missing dates break the lines."
+        "Cyan: complete daily totals. Amber diamonds: partial known totals, never treated as complete. Pink dashed: seven consecutive complete days. Missing dates break the lines."
     )
     comparison = report.get("comparison", {})
     if comparison:
@@ -199,7 +204,7 @@ def meals(report):
     )
     st.altair_chart(
         alt.Chart(pd.DataFrame(rows))
-        .mark_bar(color="#007f88")
+        .mark_bar(color=COLORS["accentSecondary"])
         .encode(
             x="Meal (source classification):N",
             y="Calories:Q",
@@ -281,13 +286,15 @@ def weights(report):
     if weight["daily"]:
         frame = pd.DataFrame(weight["daily"])
         base = alt.Chart(frame).encode(x="date:T")
-        chart = base.mark_point(color="#007f88", size=55).encode(
+        chart = base.mark_point(color=COLORS["accentSecondary"], size=55).encode(
             y=alt.Y("weight:Q", title="Recorded weight (source units)"),
             tooltip=["date:T", "weight:Q"],
         )
         if weight["unit"]:
-            chart += base.mark_line(color="#24497c").encode(y="rolling_7:Q")
-            chart += base.mark_line(color="#b96a12", strokeDash=[4, 3]).encode(y="rolling_30:Q")
+            chart += base.mark_line(color=COLORS["accentPrimary"]).encode(y="rolling_7:Q")
+            chart += base.mark_line(color=COLORS["warning"], strokeDash=[4, 3]).encode(
+                y="rolling_30:Q"
+            )
         st.altair_chart(chart, width="stretch")
     st.caption(
         "Recorded observations are not interpolated. Unit-dependent statistics and rolling averages stay unavailable when the unit is unknown."
@@ -319,23 +326,25 @@ def review(data_dir, report):
     queue = read_research_queue(data_dir)
     proposals = list_proposals(data_dir)
     st.caption(
-        f"Standard research queue: {queue['queue_count']} foods across the repository. Uploading proposals does not approve them."
+        f"{queue['queue_count']} foods still have standard-nutrient research gaps. Update My Nutrition Data checks available evidence; only exceptions need your attention."
     )
-    uploaded = st.file_uploader("Local researched proposal JSON", type=["json"])
-    if st.button("Import as pending proposal", disabled=uploaded is None):
-        apply_action(
-            lambda: import_proposal(data_dir, uploaded.getvalue()),
-            "Proposal imported or recognized as an existing duplicate; no nutrition approved.",
-        )
+    with st.expander("Advanced · manual proposal import"):
+        uploaded = st.file_uploader("Local researched proposal JSON", type=["json"])
+        if st.button("Import as pending proposal", disabled=uploaded is None):
+            apply_action(
+                lambda: import_proposal(data_dir, uploaded.getvalue()),
+                "Proposal imported or recognized as an existing duplicate; no nutrition approved.",
+            )
     subview = st.selectbox(
         "Review view",
         [
-            "Needs Research",
             "Needs Review",
-            "Ready to Approve",
+            "Automatically Enriched",
             "Approved",
             "Rejected / Deferred",
             "History",
+            "Needs Research",
+            "Ready to Approve",
         ],
     )
     if subview == "Needs Research":
@@ -354,12 +363,6 @@ def review(data_dir, report):
         flagged = [
             f for f in report["data_quality"]["foods"] if f["review_flags"] and f["source_food_id"]
         ]
-        flagged_ids = {f["source_food_id"] for f in flagged}
-        flagged += [
-            f
-            for f in report["food_contributors"]["catalog"]
-            if f["source_food_id"] and f["source_food_id"] not in flagged_ids
-        ]
         st.subheader("Contradictory or manually flagged source records")
         st.caption(
             "This list uses the selected period. Choose YTD to inspect all current 2026 flags."
@@ -371,8 +374,13 @@ def review(data_dir, report):
                 format_func=lambda i: flagged[i]["food_name"] + " · " + flagged[i]["brand"],
             )
             source = flagged[chosen]
-            st.json(source)
-            st.json(review_context(data_dir, source["source_food_id"]))
+            st.warning("Problem: " + ", ".join(str(f) for f in source.get("review_flags", [])))
+            if "oatnut" in source["food_name"].lower():
+                st.warning(
+                    "Confirm the actual slice count and label: most stored values correspond to four slices while sodium corresponds to two. Missing protein must not be filled automatically."
+                )
+            with st.expander("Stored portion and source evidence"):
+                st.json(review_context(data_dir, source["source_food_id"]))
             with st.form("source_flag"):
                 status = st.selectbox(
                     "Source review status", ["unreliable", "needs_review", "cleared"]
@@ -388,13 +396,21 @@ def review(data_dir, report):
                 "No source food IDs in this period. Choose another period to review a source record."
             )
     mapping = {
-        "Needs Review": {"needs_review", "partially_approved"},
+        "Needs Review": {"needs_review", "ready", "partially_approved"},
+        "Automatically Enriched": {"approved"},
         "Ready to Approve": {"ready", "partially_approved"},
         "Approved": {"approved"},
         "Rejected / Deferred": {"rejected", "deferred"},
         "History": None,
     }
     filtered = [p for p in proposals if mapping[subview] is None or p["status"] in mapping[subview]]
+    if subview in {"Automatically Enriched", "Approved"}:
+        filtered = [
+            p
+            for p in filtered
+            if any(a.get("actor") == "policy" and a["action"] == "approved" for a in p["history"])
+            == (subview == "Automatically Enriched")
+        ]
     if not filtered:
         st.caption("No proposals in this view.")
         return
@@ -410,6 +426,11 @@ def review(data_dir, report):
     )
     proposal = filtered[index]
     doc = proposal["document"]
+    for action in proposal["history"][-1:]:
+        if action["action"] == "needs_review":
+            st.warning(action["note"])
+    if doc.get("mismatch_explanation"):
+        st.warning(doc["mismatch_explanation"])
     if proposal["context_problem"]:
         st.warning(proposal["context_problem"])
     if proposal["conflicting_proposals"]:
@@ -421,10 +442,31 @@ def review(data_dir, report):
         preview = proposal_preview(data_dir, doc)
         with left:
             st.subheader("Stored source")
-            st.json(preview["source"])
+            for variant in preview["source"]["portion_variants"]:
+                st.write(variant["logged_portion"])
+                table(
+                    [
+                        {"Nutrient": LABELS.get(n, n), "Source value": v}
+                        for n, v in variant["source_nutrients"].items()
+                    ]
+                )
         with right:
             st.subheader("Proposed research")
-            st.json(doc)
+            st.text(doc["source_reference"])
+            st.link_button("Open research reference", doc["reference_url"])
+            st.caption(doc["nutrition_basis"]["description"])
+            table(
+                [
+                    {
+                        "Nutrient": LABELS[n["nutrient"]],
+                        "Value": n.get("estimated_value"),
+                        "Unit": n["unit"],
+                    }
+                    for n in doc["nutrients"]
+                ]
+            )
+            st.caption(f"Confidence: {doc['confidence']} · researched {doc['research_date']}")
+            st.text(doc["assumptions"])
         st.subheader("Proposed nutrient effects")
         table(preview["changes"])
     except ProposalError:
@@ -438,18 +480,42 @@ def review(data_dir, report):
     st.caption(
         "Approvals never overwrite source values. Low-confidence references remain labelled and may not be usable in analytics. Numeric reuse requires a verified portion mapping."
     )
-    edited_text = st.text_area(
-        "Edit proposal JSON before approval (optional)",
-        json.dumps(doc, indent=2),
-        height=280,
-        key=f"edit_{proposal['id']}",
-    )
+    with st.expander("Advanced · edit evidence or portion mapping"):
+        edited_text = st.text_area(
+            "Edit proposal JSON before approval (optional)",
+            json.dumps(doc, indent=2),
+            height=280,
+            key=f"edit_{proposal['id']}",
+        )
     try:
         edited = parse_proposal(edited_text.encode())
         valid = True
     except ProposalError as exc:
         edited, valid = doc, False
         st.error(str(exc))
+    if "occurrence_scaling" not in edited["nutrition_basis"]:
+        st.info(
+            "To use these values in totals, confirm how the label portion maps to your logged unit. Leave this unchecked if unsure, and defer the item."
+        )
+        units_per_label = st.number_input(
+            "Logged units represented by the label values",
+            min_value=0.01,
+            max_value=100.0,
+            value=float(edited["nutrition_basis"]["amount"]),
+            key=f"portion_amount_{proposal['id']}",
+        )
+        if st.checkbox(
+            "I confirmed this portion mapping from the label and my log",
+            key=f"portion_confirm_{proposal['id']}",
+        ):
+            edited["nutrition_basis"]["amount"] = units_per_label
+            edited["nutrition_basis"]["occurrence_scaling"] = {
+                "method": "logged_amount",
+                "unit": edited["nutrition_basis"]["unit"],
+            }
+            edited["assumptions"] += (
+                f" User confirmed label corresponds to {units_per_label:g} logged units."
+            )
     options = [
         n["nutrient"]
         for n in edited["nutrients"]
@@ -549,21 +615,11 @@ def main():
     )
     args, _ = parser.parse_known_args()
     st.set_page_config(page_title="Nutrition · Local", page_icon="◈", layout="wide")
-    st.markdown(
-        """<style>
-    html, body {font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
-    [data-testid="stSidebar"] {border-right:1px solid #d9e2ef;}
-    [data-testid="stMetric"] {background:#f2f5fa;border-top:3px solid #007f88;border-radius:8px;padding:18px;}
-    [data-testid="stMetricLabel"] {font-size:1rem;}
-    [data-testid="stHorizontalBlock"] {flex-wrap:wrap;}
-    [data-testid="stColumn"] {min-width:min(210px,100%);flex:1 1 210px;}
-    [data-testid="stMetricLabel"] p {white-space:normal;}
-    .block-container {padding-top:2rem;}
-    </style>""",
-        unsafe_allow_html=True,
-    )
+    st.markdown(css(THEME), unsafe_allow_html=True)
+    alt.theme.register("workout_companion", enable=True)(lambda: chart_config(THEME))
     st.sidebar.title("Nutrition")
-    st.sidebar.caption("LOCAL REPOSITORY · 2026")
+    st.sidebar.caption("WORKOUT COMPANION · LOCAL NUTRITION")
+    update_clicked = st.sidebar.button("Update My Nutrition Data", type="primary", width="stretch")
     section = st.sidebar.radio("Navigate", SECTIONS)
     preset = st.sidebar.selectbox("Date range", list(PRESETS))
     period = PRESETS[preset]
@@ -576,8 +632,30 @@ def main():
     grouping = "name" if st.sidebar.checkbox("Group by normalized name + brand") else "id"
     st.sidebar.button("Refresh local data")
     st.sidebar.caption(
-        "Refresh reads SQLite only. No sync, network research or background polling."
+        "Browsing and Refresh are local-only. Update explicitly reads Lose It and runs the controlled evidence worker. No background polling."
     )
+    if update_clicked:
+        with st.status("Updating nutrition data", expanded=True) as status:
+            result = run_update(args.data_dir, progress=st.write)
+            status.update(
+                label="Update stopped" if result["status"] == "failed" else "Update finished",
+                state="error" if result["status"] == "failed" else "complete",
+                expanded=False,
+            )
+        st.session_state["update_result"] = result
+    result = st.session_state.get("update_result") or latest_update(args.data_dir)
+    if result:
+        if result["status"] == "failed":
+            st.error(result.get("error", "Update stopped; retry when the connection is restored."))
+        else:
+            st.success(
+                f"Data updated through {result['through_date']} · {result['occurrences_added']} new entries · {result['weights_added']} new weights"
+            )
+            st.caption(
+                f"{result['foods_checked']} foods checked · {result['automatically_enriched']} automatically enriched · {result['nutrients_filled']} nutrients filled · {result.get('needs_review', 0)} need review · {result['unresolved']} unresolved · {result['failures']} research failures"
+            )
+            if result["unresolved"]:
+                st.info(result["research_capability"])
     if "notice" in st.session_state:
         st.success(st.session_state.pop("notice"))
     st.title(section)

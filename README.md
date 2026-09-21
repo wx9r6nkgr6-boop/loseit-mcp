@@ -526,13 +526,77 @@ which remains authoritative for research availability.
 
 `app_summary` is a small projection containing period length, logging completeness,
 calorie/protein/fiber/sugar/sodium averages, protein adherence, weight change and
-three empty insight slots. Request a 7-day period for a 7-day app summary. No
-medical advice or generated conclusions are inserted into those slots. No
+deterministic factual insight slots. Request a 7-day period for a 7-day app
+summary. No medical advice or model-generated conclusions are inserted. No
 CloudKit, remote API, dashboard framework or workout-app integration is installed.
 
-The workflow remains sync/backfill → optional coverage → research queue → upload
-to ChatGPT for separate research → review/import → rerun queue and analytics.
-Nothing in sync or analytics performs web enrichment.
+The manual queue/proposal workflow remains available as an advanced recovery and
+audit facility. It is no longer the normal path for configured evidence sources.
+
+## Normal update workflow
+
+1. Open the dashboard.
+2. Click **Update My Nutrition Data**.
+3. Review only items shown in **Needs Review**.
+
+The same operation is available for manual or future scheduled execution:
+
+```bash
+uv run loseit-update
+uv run loseit-update --json  # machine-readable completion summary
+```
+
+The operation preflights the saved session with two read-only calls, resumes from
+the last successful sync checkpoint, retrieves diary and weight data in bounded
+windows, updates raw snapshots and normalized records, checks the genuine
+standard-nutrient gap queue, invokes the configured evidence worker, applies a
+strict acceptance policy, then recalculates analytics. Both the dashboard and CLI
+call `update.run_update`; there is no second sync implementation or background
+polling. An OS file lock prevents concurrent update and backfill runs. Completed
+sync windows and append-only stage events make retries idempotent and preserve
+progress after an interruption.
+
+The bundled `CuratedEvidenceWorker` is intentionally finite: it contains the four
+previously researched references described below. This environment does not offer
+a reliable external research API that the local dashboard can call, so unmapped
+foods remain unresolved. No guessed or calorie-derived nutrition substitutes for
+missing evidence. `ResearchWorker` is the explicit provider boundary for a future
+source; it receives only stable food ID, normalized name and brand—not auth,
+account identity, diary dates or raw logs.
+
+### Research and automatic-acceptance policy
+
+`exact-label-v1` accepts a missing-nutrient proposal only when all of these hold:
+
+- stable source ID and normalized product/brand match exactly;
+- evidence is a current (90 days or newer) manufacturer or retailer label;
+- confidence is high and evidence values pass unit, finite-number, label-bound,
+  and parent/subnutrient checks;
+- every current source portion variant has an explicit matching unit and sane
+  scale factor;
+- calories and at least three existing non-calorie nutrients match the label at
+  that exact scale within a deliberately narrow tolerance;
+- no source conflict, stale context, conflicting proposal, manual flag, prior
+  human rejection/defer decision, evidence mismatch or unexplained portion issue.
+
+Anything else is append-only `Needs Review`; it is never silently discarded or
+promoted. The policy fills only missing source nutrients through enrichment.
+Source observations always win and retain their raw snapshot. Automatic decisions
+carry `approval_actor=policy`; human approvals retain `manually_reviewed=1`, so
+audit history never misrepresents automation as a person.
+
+Bundled seed outcomes under this policy:
+
+- Walmart Frosted Sugar Cookie: **Needs Review**. Eat This Much is secondary
+  evidence, and calorie-only source matching cannot prove portion identity.
+- McDonald's McCafé Iced Mocha Medium: **Needs Review**. The fingerprint matches,
+  but CalorieKing is a secondary database rather than a direct product/retailer label.
+- Great Value Sharp Cheddar: **eligible for automatic enrichment**. Instacart's
+  retailer label matches the three-slice fingerprint and fills only 0 g carbohydrate.
+- OREO Frozen Dessert Mini Cones: **Needs Review**. Kroger defines 220 calories as
+  two cones/84 g while Lose It records one piece with the same fingerprint.
+- Arnold Oatnut Bread: **Needs Review**. Most stored values scale like four slices
+  while sodium scales like two; missing protein must not be automatically filled.
 
 ## Dashboard v1 (localhost only)
 
@@ -547,15 +611,30 @@ Streamlit usage telemetry and file watching, keeps CORS/XSRF protection enabled,
 limits uploads to 1 MB, disables static-directory serving and detailed error
 traces, and uses an owner-only umask for new files. Use this launcher rather than
 an unrestricted `streamlit run`. There is no public hosting, external font/chart
-CDN, sync button, background polling, remote API, or nutrition research. Refresh
-reloads local data only. Other local processes/users with access to this machine
+CDN, remote proposal API or background polling. **Refresh local data** reloads
+SQLite only. **Update My Nutrition Data** is the only dashboard action that
+explicitly contacts Lose It, through the existing read-only facade, and then runs
+the controlled evidence worker. Other local processes/users with access to this machine
 are not isolated by an application login: this is a single-user local tool, not
 a multiuser server. Do not tunnel or reverse-proxy it to a public interface.
 
 Streamlit was chosen to keep the dashboard in the existing Python/uv project:
 its local forms, uploads, tables, charts and AppTest support avoid a separate
-frontend build. The dashboard imports the reusable analytics, research queue,
-proposal and repository services, never Lose It authentication/configuration.
+frontend build. Analytics pages import the reusable analytics, research queue,
+proposal and repository services. Authentication is lazily loaded only after the
+explicit Update action enters `update.live_service`; ordinary page loads do not
+access `liauth` or the network.
+
+### Companion theme tokens
+
+`companion_theme.json` is a standalone reference derived from workout-app commit
+`6703248d`, file `MattFoleysMotivationalGym/AppTheme.swift`. It maps the app's dark
+background/panel/panelRaised colors, pink/cyan/violet accents, lime/amber/danger
+states, text hierarchy, 8-point corner radius, 16-point card padding and 14-point
+spacing to dashboard tokens. `theme.py` validates the packaged values, supplies a
+neutral accessible fallback, generates Streamlit CSS, and configures Altair axes
+and palettes. The dashboard has no runtime dependency on the Swift repository and
+the workout app is not modified.
 
 ### Sections and date filtering
 
@@ -579,8 +658,10 @@ proposal and repository services, never Lose It authentication/configuration.
 - **Coverage & Data Quality:** source and numeric combined coverage, missing
   standard nutrients, enrichment-filled gaps, contradictions and manual flags.
   Unknown nutrients are tucked behind an explicit advanced-details action.
-- **Review & Enrichment:** research queue, pending proposals, comparisons, review
-  decisions, source annotations and history. Queue counts are repository-wide;
+- **Review & Enrichment:** exception-first Needs Review inbox, automatic versus
+  human approval history, clear portion/evidence problems, minimal portion
+  confirmation, advanced manual import/editing, source annotations and history.
+  Queue counts are repository-wide;
   contradiction/source selectors use the selected analytics period (YTD for all
   current 2026 records).
 - **Settings & Targets:** optional protein, calorie range, fiber, sodium upper
@@ -592,7 +673,7 @@ existing incomplete-data and local-calendar semantics still apply. In particular
 an unresolved reference is not necessarily missing nutrition. Research
 availability and safely portion-scaled numeric coverage remain distinct.
 
-### File → pending proposal → human decision
+### Advanced manual file → pending proposal → human decision
 
 1. Run sync/backfill separately and export the standard research queue.
 2. Research outside this application; have ChatGPT produce one proposal per food.
@@ -649,7 +730,8 @@ Use one UTF-8 JSON object per file, at most 1 MB, containing:
   cholesterol, and g for the other standard nutrients.
 - Optional `notes` and `mismatch_explanation`.
 
-Do not include `manually_reviewed`: the UI sets that only on approval. Unknown
+Do not include `manually_reviewed`: the review service records human and policy
+actors internally after a decision. Unknown
 fields, duplicate JSON keys, unsupported/duplicate nutrients, missing provenance,
 wrong units, negative/nonfinite/string/boolean numeric values, invalid bounds,
 future research dates and credential-bearing/non-HTTP reference URLs are rejected.
@@ -673,6 +755,11 @@ preventing updates/deletes. Settings store successive local snapshots, not brows
 storage. Schema migration occurs only on an explicit local write action; opening
 dashboard analytics against schema 1–3 remains read-only with no auth requirement.
 
+Schema 5 adds append-only `update_events` and `research_decisions`, and records
+the actor on proposal decisions and enrichment versions. Migration still occurs
+only after a successful remote preflight reaches an explicit write (or another
+explicit local write action).
+
 `insights.generate_insights` produces up to five deterministic factual statements
 using analytics outputs: configured protein adherence, valid prior-period calorie
 changes, complete weekday/weekend comparison, incomplete fiber-day counts, top
@@ -685,10 +772,11 @@ adherence are reusable functions in the same service.
 No credentials or raw diary payloads are sent to telemetry or debug logs. Uploaded
 proposals stay local; data is stored in the existing private repository and never
 committed. The launcher's error boundary avoids displaying diary-bearing tracebacks.
-Private reports remain gitignored. Do not approve demonstration/fixture research
-against a real repository. UI tests use isolated fixtures; real verification is
-read-only. Refresh is manual, and another explicit refresh is needed after an
-external sync or CLI import. No file/drop-folder watcher is installed.
+Private reports remain gitignored. Fixture research is never approved against a
+real repository. Update errors are redacted at the worker/UI boundary. A failed
+preflight writes nothing; a later chunk failure preserves completed windows and
+records a credential-free failure status for safe retry. No file/drop-folder
+watcher is installed.
 
 ## Analysis readiness
 
@@ -700,16 +788,17 @@ the sync path; trustworthy collection and provenance come first.
 
 ## Scheduling later
 
-No scheduler or cloud service is installed. A weekly local scheduler can run:
+No scheduler or cloud service is installed. A future weekly/monthly local
+scheduler should call the same resumable operation as the dashboard:
 
 ```bash
-cd /absolute/path/to/loseit-readonly && uv run loseit-sync --days 7
+cd /absolute/path/to/loseit-readonly && uv run loseit-update
 ```
 
-A monthly job should split months longer than 31 days into bounded calls or use
-one exact 31-day range. Re-running the same dates does not duplicate diary or
-weight rows. Raw snapshots are content-addressed, so an unchanged response is
-not duplicated while a changed upstream day is preserved as a new snapshot.
+`loseit-update` performs its own bounded windows and checkpoints. Re-running does
+not duplicate diary, weight, proposal, decision or enrichment rows. Raw snapshots
+are content-addressed, so an unchanged response is not duplicated while a changed
+upstream day is preserved as a new snapshot.
 
 ## Privacy and backups
 

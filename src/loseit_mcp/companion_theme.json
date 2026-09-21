@@ -1,0 +1,28 @@
+{
+  "source_commit": "6703248d",
+  "source_file": "MattFoleysMotivationalGym/MattFoleysMotivationalGym/AppTheme.swift",
+  "variant": "dark",
+  "colors": {
+    "background": "#040507", "surface": "#090B0F", "surfaceElevated": "#0E1016",
+    "accentPrimary": "#FF3BBF", "accentSecondary": "#00D1FF", "violet": "#9E38FF",
+    "textPrimary": "#F0F5FA", "textSecondary": "#ACACAC", "textMuted": "#919191",
+    "success": "#7AFF2E", "warning": "#FFAD1A", "danger": "#FF474D", "border": "#282A2E"
+  },
+  "radius": 8, "cardPadding": 16, "spacing": 14,
+  "mapping": {
+    "background": "AppTheme.background dark RGB .015/.018/.026",
+    "surface": "AppTheme.panel dark RGB .035/.043/.060",
+    "surfaceElevated": "AppTheme.panelRaised dark RGB .055/.064/.085",
+    "accentPrimary": "AppTheme.pink / ScreenScaffold.tint",
+    "accentSecondary": "AppTheme.cyan / StatPill accent",
+    "violet": "AppTheme.violet",
+    "textPrimary": "AppTheme.text dark RGB .94/.96/.98",
+    "textSecondary": "AppTheme.secondaryText white .66 composited on dark panel",
+    "textMuted": "AppTheme.mutedText adapted brighter for small browser text contrast",
+    "success": "AppTheme.lime dark", "warning": "AppTheme.amber", "danger": "AppTheme.danger",
+    "border": "AppTheme.line white .14 composited on panel",
+    "radius": "NeonCardModifier / StatPill / NeonButtonStyle cornerRadius 8",
+    "cardPadding": "NeonCardModifier padding 16",
+    "spacing": "HomeDashboardView VStack/HStack spacing 14"
+  }
+}

@@ -13,7 +13,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Self
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SOURCE = "loseit"
 STANDARD_NUTRIENTS = (
     "calories",
@@ -288,6 +288,32 @@ MIGRATIONS = (
     CREATE TRIGGER flags_no_delete BEFORE DELETE ON source_review_flags BEGIN SELECT RAISE(ABORT,'Flag history is append-only'); END;
     CREATE TRIGGER settings_no_update BEFORE UPDATE ON dashboard_settings_versions BEGIN SELECT RAISE(ABORT,'Settings history is append-only'); END;
     CREATE TRIGGER settings_no_delete BEFORE DELETE ON dashboard_settings_versions BEGIN SELECT RAISE(ABORT,'Settings history is append-only'); END;
+    """,
+    """
+    ALTER TABLE proposal_reviews ADD COLUMN actor TEXT NOT NULL DEFAULT 'user';
+    ALTER TABLE enrichment_versions ADD COLUMN approval_actor TEXT NOT NULL DEFAULT 'legacy';
+    CREATE TABLE update_events (
+        id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, stage TEXT NOT NULL,
+        summary_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE research_decisions (
+        id INTEGER PRIMARY KEY, proposal_id INTEGER NOT NULL REFERENCES research_proposals(id),
+        evidence_json TEXT NOT NULL, decision_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER update_events_no_update BEFORE UPDATE ON update_events BEGIN SELECT RAISE(ABORT,'Update history is append-only'); END;
+    CREATE TRIGGER update_events_no_delete BEFORE DELETE ON update_events BEGIN SELECT RAISE(ABORT,'Update history is append-only'); END;
+    CREATE TRIGGER research_decisions_no_update BEFORE UPDATE ON research_decisions BEGIN SELECT RAISE(ABORT,'Research history is append-only'); END;
+    CREATE TRIGGER research_decisions_no_delete BEFORE DELETE ON research_decisions BEGIN SELECT RAISE(ABORT,'Research history is append-only'); END;
+    CREATE TRIGGER enrichment_versions_no_update BEFORE UPDATE ON enrichment_versions BEGIN SELECT RAISE(ABORT,'Enrichment history is append-only'); END;
+    CREATE TRIGGER enrichment_versions_no_delete BEFORE DELETE ON enrichment_versions BEGIN SELECT RAISE(ABORT,'Enrichment history is append-only'); END;
+    CREATE TRIGGER estimated_nutrients_no_update BEFORE UPDATE ON estimated_nutrients BEGIN SELECT RAISE(ABORT,'Enrichment nutrients are append-only'); END;
+    CREATE TRIGGER estimated_nutrients_no_delete BEFORE DELETE ON estimated_nutrients BEGIN SELECT RAISE(ABORT,'Enrichment nutrients are append-only'); END;
+    CREATE TRIGGER enrichment_contexts_no_update BEFORE UPDATE ON enrichment_review_contexts BEGIN SELECT RAISE(ABORT,'Enrichment context is append-only'); END;
+    CREATE TRIGGER enrichment_contexts_no_delete BEFORE DELETE ON enrichment_review_contexts BEGIN SELECT RAISE(ABORT,'Enrichment context is append-only'); END;
+    CREATE TRIGGER raw_diary_no_update BEFORE UPDATE ON raw_diary_snapshots BEGIN SELECT RAISE(ABORT,'Raw diary snapshots are immutable'); END;
+    CREATE TRIGGER raw_diary_no_delete BEFORE DELETE ON raw_diary_snapshots BEGIN SELECT RAISE(ABORT,'Raw diary snapshots are immutable'); END;
+    CREATE TRIGGER raw_weight_no_update BEFORE UPDATE ON raw_weight_snapshots BEGIN SELECT RAISE(ABORT,'Raw weight snapshots are immutable'); END;
+    CREATE TRIGGER raw_weight_no_delete BEFORE DELETE ON raw_weight_snapshots BEGIN SELECT RAISE(ABORT,'Raw weight snapshots are immutable'); END;
     """,
 )
 
@@ -684,11 +710,12 @@ class NutritionRepository:
             cursor = self.connection.execute(
                 """INSERT INTO enrichment_versions
                    (reference_id,version,source_reference,reference_url,match_type,confidence,
-                    assumptions,research_date,manually_reviewed,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    assumptions,research_date,manually_reviewed,created_at,approval_actor)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (reference["id"], version, source_reference, document.get("reference_url"),
                  match_type, confidence, assumptions, research_date,
-                 int(bool(document.get("manually_reviewed"))), _now()),
+                 int(bool(document.get("manually_reviewed"))), _now(),
+                 str(document.get("approval_actor") or "legacy")),
             )
             enrichment_id = int(cursor.lastrowid)
             if target is not None:

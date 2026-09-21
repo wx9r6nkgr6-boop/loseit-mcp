@@ -260,7 +260,7 @@ def _list(c):
             for n in json.loads(a["selected_json"])
         }
         latest = actions[-1]["action"] if actions else "ready"
-        if latest in {"imported", "needs_review"}:
+        if latest == "imported":
             latest = "ready"
         problem = _context_problem(c, doc) if latest not in {"approved", "rejected"} else None
         if problem and latest != "deferred":
@@ -351,6 +351,7 @@ def review_proposal(
     edited_document=None,
     note="",
     acknowledge_conflicts=False,
+    policy_evidence=None,
 ):
     if action not in {"approve", "rejected", "deferred"}:
         raise ProposalError("Unsupported review action")
@@ -368,6 +369,24 @@ def review_proposal(
         version_id = None
         chosen = []
         if action == "approve":
+            if policy_evidence is not None:
+                from .enrichment_worker import evaluate
+
+                decision = evaluate(
+                    policy_evidence,
+                    document,
+                    source_context(c, document["target"]["source_food_id"]),
+                )
+                flag = c.execute(
+                    "SELECT status FROM source_review_flags WHERE source_food_id=? ORDER BY id DESC LIMIT 1",
+                    (document["target"]["source_food_id"],),
+                ).fetchone()
+                if not decision["auto_approve"] or (flag and flag[0] != "cleared"):
+                    raise ProposalError("Automatic acceptance policy requires review")
+                c.execute(
+                    "INSERT INTO research_decisions(proposal_id,evidence_json,decision_json,created_at) VALUES (?,?,?,?)",
+                    (proposal_id, canonical(decision.pop("evidence")), canonical(decision), _now()),
+                )
             if proposal["conflicting_proposals"] and not acknowledge_conflicts:
                 raise ProposalError(
                     "Review conflicting proposals and explicitly acknowledge the conflict"
@@ -416,7 +435,7 @@ def review_proposal(
                         "Retained nutrients have a different portion basis; review a complete replacement proposal"
                     )
                 if retained and (
-                    not old["manually_reviewed"]
+                    not (old["manually_reviewed"] or old["approval_actor"] == "policy")
                     or any(
                         old[k] != document[k]
                         for k in (
@@ -435,7 +454,11 @@ def review_proposal(
                 merged.update({n["nutrient"]: n for n in retained})
             merged.update({n: nutrients[n] for n in chosen})
             approved = {k: v for k, v in document.items() if k not in {"schema_version", *OPTIONAL}}
-            approved.update(nutrients=list(merged.values()), manually_reviewed=True)
+            approved.update(
+                nutrients=list(merged.values()),
+                manually_reviewed=policy_evidence is None,
+                approval_actor="policy" if policy_evidence is not None else "user",
+            )
             result = repo.import_enrichment(approved, manage_transaction=False)
             version_id = c.execute(
                 "SELECT id FROM enrichment_versions WHERE reference_id=? AND version=?",
@@ -444,7 +467,7 @@ def review_proposal(
             remaining = set(nutrients) - set(proposal["approved_nutrients"]) - set(chosen)
             action = "partially_approved" if remaining else "approved"
         c.execute(
-            "INSERT INTO proposal_reviews(proposal_id,action,document_json,selected_json,user_edited,enrichment_version_id,note,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO proposal_reviews(proposal_id,action,document_json,selected_json,user_edited,enrichment_version_id,note,created_at,actor) VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 proposal_id,
                 action,
@@ -454,6 +477,7 @@ def review_proposal(
                 version_id,
                 note,
                 _now(),
+                "policy" if policy_evidence is not None else "user",
             ),
         )
         return {"status": action, "enrichment_version_id": version_id}

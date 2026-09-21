@@ -5,8 +5,11 @@ import os
 import sys
 from pathlib import Path
 
+from .theme import load_theme
+
 
 def command(port, data_dir):
+    colors = load_theme()["colors"]
     return [
         sys.executable,
         "-m",
@@ -26,11 +29,11 @@ def command(port, data_dir):
         "--client.showErrorDetails=false",
         "--client.toolbarMode=minimal",
         "--logger.level=error",
-        "--theme.base=light",
-        "--theme.primaryColor=#007f88",
-        "--theme.backgroundColor=#ffffff",
-        "--theme.secondaryBackgroundColor=#f2f5fa",
-        "--theme.textColor=#10253f",
+        "--theme.base=dark",
+        f"--theme.primaryColor={colors['accentPrimary']}",
+        f"--theme.backgroundColor={colors['background']}",
+        f"--theme.secondaryBackgroundColor={colors['surfaceElevated']}",
+        f"--theme.textColor={colors['textPrimary']}",
         "--",
         "--data-dir",
         str(data_dir),

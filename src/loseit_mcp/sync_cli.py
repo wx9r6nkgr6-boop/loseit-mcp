@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -157,33 +157,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
 
             start, end = _range(args)
-            run_id = repository.begin_sync(start.isoformat(), end.isoformat())
-            retrieved_at = datetime.now(UTC).isoformat(timespec="seconds")
-            try:
-                settings = load_settings()
-                with ReadOnlyLoseItService(settings) as service:
-                    payload = service.get_diary_range(start.isoformat(), end.isoformat())
-                    summary: dict[str, Any] = repository.ingest_range(
-                        payload, retrieved_at=retrieved_at
-                    )
-                    if not args.no_weights:
-                        weights = service.get_weight_history(
-                            start=start.isoformat(), end=end.isoformat()
-                        )
-                        summary.update(repository.ingest_weights(weights, retrieved_at=retrieved_at))
-                summary.update(
-                    {
-                        "status": "ok",
-                        "start_date": start.isoformat(),
-                        "end_date": end.isoformat(),
-                        "database": str(repository.db_path),
-                        "unresolved_foods": len(repository.unresolved()),
-                    }
-                )
-                repository.finish_sync(run_id, "ok", summary)
-            except Exception as exc:
-                repository.finish_sync(run_id, "failed", {"error_type": type(exc).__name__})
-                raise
+            from .update import sync_window
+
+            with ReadOnlyLoseItService(load_settings()) as service:
+                summary = sync_window(repository, service, start, end,
+                                      include_weights=not args.no_weights, request_delay=0)
+            summary.update(status="ok", start_date=start.isoformat(), end_date=end.isoformat(),
+                           database=str(repository.db_path), unresolved_foods=len(repository.unresolved()))
         print(json.dumps(summary, indent=2))
         return 0
     except Exception as exc:  # noqa: BLE001 - CLI boundary; message is credential-free

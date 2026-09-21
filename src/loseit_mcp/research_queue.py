@@ -269,7 +269,7 @@ def _queue(c: sqlite3.Connection) -> dict[str, Any]:
                 past = review_contexts.get(link["id"], [])
                 changed = bool(past) and _conflicts(past + context)
                 trusted = (
-                    link["manually_reviewed"] == 1
+                    (link["manually_reviewed"] == 1 or link.get("approval_actor") == "policy")
                     and link["confidence"] == "high"
                     and link["match_type"] != "insufficient_information"
                     and (
@@ -288,6 +288,7 @@ def _queue(c: sqlite3.Connection) -> dict[str, Any]:
                     "match_type": link["match_type"],
                     "confidence": link["confidence"],
                     "manually_reviewed": bool(link["manually_reviewed"]),
+                    "approval_actor": link.get("approval_actor", "legacy"),
                     "eligible_for_reuse": trusted,
                     "source_context_conflict": changed or conflict,
                 }

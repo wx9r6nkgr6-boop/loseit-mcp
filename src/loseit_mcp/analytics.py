@@ -129,7 +129,7 @@ def _prepare(c):
                 review = reviews.get(link["id"], {})
                 past = json.loads(review.get("source_context_json", "[]"))
                 trusted = (
-                    link["manually_reviewed"] == 1
+                    (link["manually_reviewed"] == 1 or link.get("approval_actor") == "policy")
                     and link["confidence"] == "high"
                     and link["match_type"] != "insufficient_information"
                     and (
