@@ -33,6 +33,7 @@ class Evidence:
     identity_verified: bool = True
     confidence: str = "high"
     concerns: tuple[str, ...] = ()
+    match_type: str = "exact_brand_product"
 
 
 class ResearchWorker(Protocol):
@@ -57,7 +58,7 @@ def make_proposal(candidate, evidence):
         "brand": candidate["brand"],
         "source_reference": evidence.title,
         "reference_url": evidence.url,
-        "match_type": "exact_brand_product",
+        "match_type": evidence.match_type,
         "confidence": evidence.confidence,
         "research_date": evidence.research_date,
         "assumptions": "Evidence is per stated label basis; source values always win. "
@@ -107,7 +108,7 @@ def evaluate(evidence, document, context, *, today=None):
         or document["source_reference"] != evidence.title
         or document["research_date"] != evidence.research_date
         or document["confidence"] != evidence.confidence
-        or document["match_type"] != "exact_brand_product"
+        or document["match_type"] != evidence.match_type
     ):
         reasons.append("Proposal provenance does not match the verified evidence.")
     if evidence.source_kind not in {"manufacturer_label", "retailer_label"}:

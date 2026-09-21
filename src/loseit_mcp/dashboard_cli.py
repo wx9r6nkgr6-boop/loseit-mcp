@@ -42,7 +42,7 @@ def command(port, data_dir):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Local nutrition dashboard; no remote sync or auth."
+        description="Local nutrition dashboard; remote reads occur only after explicit actions."
     )
     parser.add_argument("--port", type=int, default=8501)
     parser.add_argument(

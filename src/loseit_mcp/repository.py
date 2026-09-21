@@ -13,7 +13,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Self
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SOURCE = "loseit"
 STANDARD_NUTRIENTS = (
     "calories",
@@ -314,6 +314,16 @@ MIGRATIONS = (
     CREATE TRIGGER raw_diary_no_delete BEFORE DELETE ON raw_diary_snapshots BEGIN SELECT RAISE(ABORT,'Raw diary snapshots are immutable'); END;
     CREATE TRIGGER raw_weight_no_update BEFORE UPDATE ON raw_weight_snapshots BEGIN SELECT RAISE(ABORT,'Raw weight snapshots are immutable'); END;
     CREATE TRIGGER raw_weight_no_delete BEFORE DELETE ON raw_weight_snapshots BEGIN SELECT RAISE(ABORT,'Raw weight snapshots are immutable'); END;
+    """,
+    """
+    CREATE TABLE research_attempts (
+        id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, source_food_id TEXT NOT NULL,
+        provider TEXT NOT NULL, status TEXT NOT NULL, summary_json TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_research_attempt_food ON research_attempts(source_food_id,id);
+    CREATE TRIGGER research_attempts_no_update BEFORE UPDATE ON research_attempts BEGIN SELECT RAISE(ABORT,'Research attempts are append-only'); END;
+    CREATE TRIGGER research_attempts_no_delete BEFORE DELETE ON research_attempts BEGIN SELECT RAISE(ABORT,'Research attempts are append-only'); END;
     """,
 )
 

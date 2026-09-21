@@ -6,6 +6,7 @@ research worker. Authentication is loaded only by the live-service factory.
 
 import argparse
 import fcntl
+import hashlib
 import json
 from contextlib import contextmanager
 from datetime import date, timedelta
@@ -13,7 +14,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from .analytics import read_analytics
-from .enrichment_worker import CuratedEvidenceWorker, evaluate, make_proposal
+from .enrichment_worker import evaluate, make_proposal
+from .nutrition_provider import ResearchIssue, build_research_worker
 from .proposals import (
     canonical,
     import_proposal,
@@ -22,6 +24,7 @@ from .proposals import (
     review_proposal,
     source_context,
 )
+from .reconnect import is_reconnect_error
 from .repository import NutritionRepository, _now
 from .research_queue import read_research_queue
 
@@ -102,6 +105,53 @@ def _event(data_dir, run, stage, summary):
         )
 
 
+def _research_event(data_dir, run, source_food_id, provider, status, summary):
+    safe = canonical(summary)
+    digest = hashlib.sha256(
+        canonical(
+            {
+                "source_food_id": source_food_id,
+                "provider": provider,
+                "status": status,
+                "summary": summary,
+            }
+        ).encode()
+    ).hexdigest()
+    with NutritionRepository(Path(data_dir)) as repo, repo.connection as c:
+        c.execute(
+            """INSERT OR IGNORE INTO research_attempts
+               (run_id,source_food_id,provider,status,summary_json,content_sha256,created_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (run, source_food_id, provider, status, safe, digest, _now()),
+        )
+
+
+def latest_research_issues(data_dir):
+    """Latest provider exception per food, with no credential or diary payloads."""
+    with reader(data_dir) as c:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE name='research_attempts'").fetchone():
+            return []
+        rows = c.execute(
+            """SELECT a.source_food_id,a.provider,a.status,a.summary_json,a.created_at
+               FROM research_attempts a
+               JOIN (SELECT source_food_id,MAX(id) id FROM research_attempts GROUP BY source_food_id) x
+                 ON x.id=a.id
+               WHERE a.status IN ('no_exact_match','ambiguous_match','conflicting_evidence',
+                                  'serving_mismatch','branded_generic_blocked')
+               ORDER BY a.id DESC"""
+        ).fetchall()
+    return [
+        {
+            "source_food_id": row[0],
+            "provider": row[1],
+            "status": row[2],
+            "summary": json.loads(row[3]),
+            "created_at": row[4],
+        }
+        for row in rows
+    ]
+
+
 def _apply_evidence(data_dir, candidate, evidence):
     doc = make_proposal(candidate, evidence)
     imported = import_proposal(data_dir, canonical(doc).encode())
@@ -152,12 +202,13 @@ def _apply_evidence(data_dir, candidate, evidence):
     return "review", 0
 
 
-def process_research(data_dir, *, worker=None, progress=lambda text: None):
+def process_research(data_dir, *, worker=None, run_id=None, progress=lambda text: None):
     """Shared local evidence stage, also callable for an explicit seed migration.
 
     Never syncs or claims a through-date. The caller must serialize writes.
     """
-    worker = worker if worker is not None else CuratedEvidenceWorker()
+    worker = worker if worker is not None else build_research_worker()
+    run_id = run_id or str(uuid4())
     queue = read_research_queue(data_dir)
     result = {
         "candidates": queue["queue_count"],
@@ -167,6 +218,7 @@ def process_research(data_dir, *, worker=None, progress=lambda text: None):
         "nutrients_filled": 0,
         "sent_to_review": 0,
         "failures": 0,
+        "research_unavailable": 0,
         "unresolved": 0,
     }
     # Explicitly supplied exception: annotation only, never fabricated enrichment.
@@ -191,17 +243,67 @@ def process_research(data_dir, *, worker=None, progress=lambda text: None):
             result["unresolved"] += 1
             continue
         try:
-            request = {k: candidate[k] for k in ("source_food_id", "food_name", "brand")}
+            keys = ["source_food_id", "food_name", "brand"]
+            if getattr(worker, "requires_context", False):
+                keys.extend(("portion_variants", "missing_standard_nutrients"))
+            request = {key: candidate[key] for key in keys}
             evidence = worker.research(request)
             if evidence is None:
+                _research_event(
+                    data_dir,
+                    run_id,
+                    candidate["source_food_id"],
+                    getattr(worker, "provider", "configured worker"),
+                    "no_result",
+                    {"message": "No exact evidence was returned."},
+                )
                 result["unresolved"] += 1
                 continue
             result["researched"] += 1
+            _research_event(
+                data_dir,
+                run_id,
+                candidate["source_food_id"],
+                getattr(worker, "provider", evidence.source_kind),
+                "evidence_found",
+                {
+                    "title": evidence.title,
+                    "reference_url": evidence.url,
+                    "research_date": evidence.research_date,
+                    "source_kind": evidence.source_kind,
+                    "basis": {
+                        "amount": evidence.basis_amount,
+                        "unit": evidence.basis_unit,
+                        "description": evidence.basis_description,
+                    },
+                },
+            )
             progress("Applying verified enrichment · checking identity, portion and fingerprint")
             outcome, count = _apply_evidence(data_dir, candidate, evidence)
             result["automatically_enriched"] += outcome == "automatic"
             result["sent_to_review"] += outcome == "review"
             result["nutrients_filled"] += count
+        except ResearchIssue as exc:
+            _research_event(
+                data_dir,
+                run_id,
+                candidate["source_food_id"],
+                exc.provider,
+                exc.status,
+                {"message": exc.summary},
+            )
+            result["sent_to_review"] += int(exc.needs_review)
+            result["failures"] += int(exc.failure)
+            result["research_unavailable"] += int(
+                exc.status
+                in {
+                    "provider_not_configured",
+                    "provider_unavailable",
+                    "timeout",
+                    "malformed_response",
+                }
+            )
+            result["unresolved"] += 1
         except Exception:  # noqa: BLE001 - sanitize external worker failures
             result["failures"] += 1
             result["unresolved"] += 1
@@ -215,7 +317,7 @@ def run_update(
     if not (data_dir / "nutrition.sqlite3").is_file():
         raise ValueError("Existing nutrition repository required")
     today = today or date.today()  # noqa: DTZ011
-    worker = worker if worker is not None else CuratedEvidenceWorker()
+    worker = worker if worker is not None else build_research_worker()
     result = {
         "status": "failed",
         "through_date": None,
@@ -228,6 +330,7 @@ def run_update(
         "nutrients_filled": 0,
         "sent_to_review": 0,
         "failures": 0,
+        "research_unavailable": 0,
         "unresolved": 0,
         "analytics_refreshed": False,
         "research_capability": getattr(worker, "capability", "Configured worker"),
@@ -243,27 +346,40 @@ def run_update(
             return result | {"error": "Another update or backfill is running."}
         try:
             progress("Checking Lose It authentication and compatibility")
-            with service_factory() as service:
-                # No identity or auth data is saved, returned or logged.
-                service.whoami()
-                service.search_food("water", limit=1, detail=False)
-                before = read_analytics(data_dir, date(today.year, 1, 1), today, compare=False)
-                result["coverage_before"] = before["nutrient_coverage"]
-                start = next_start(data_dir, today)
-                _event(data_dir, run, "started", {"requested_through": today.isoformat()})
-                started = True
-                while start <= today:
-                    end = min(start + timedelta(days=30), today)
-                    progress(f"Syncing Lose It · {start} through {end}")
-                    with NutritionRepository(data_dir) as repo:
-                        summary = sync_window(repo, service, start, end)
-                    for key in ("occurrences_added", "weights_added"):
-                        result[key] += summary.get(key, 0)
-                    result["through_date"] = end.isoformat()
-                    _event(data_dir, run, "sync_checkpoint", result)
-                    start = end + timedelta(days=1)
+            try:
+                with service_factory() as service:
+                    # No identity or auth data is saved, returned or logged.
+                    service.whoami()
+                    service.search_food("water", limit=1, detail=False)
+                    _event(data_dir, run, "auth_checked", {"status": "connected"})
+                    before = read_analytics(
+                        data_dir, date(today.year, 1, 1), today, compare=False
+                    )
+                    result["coverage_before"] = before["nutrient_coverage"]
+                    start = next_start(data_dir, today)
+                    _event(data_dir, run, "started", {"requested_through": today.isoformat()})
+                    started = True
+                    while start <= today:
+                        end = min(start + timedelta(days=30), today)
+                        progress(f"Syncing Lose It · {start} through {end}")
+                        with NutritionRepository(data_dir) as repo:
+                            summary = sync_window(repo, service, start, end)
+                        for key in ("occurrences_added", "weights_added"):
+                            result[key] += summary.get(key, 0)
+                        result["through_date"] = end.isoformat()
+                        _event(data_dir, run, "sync_checkpoint", result)
+                        start = end + timedelta(days=1)
+            except Exception as exc:
+                if not is_reconnect_error(exc):
+                    raise
+                result["status"] = "reconnect_required"
+                result["error"] = "Lose It connection expired. Reconnect to continue this update."
+                _event(data_dir, run, "reconnect_required", {"status": "reconnect_required"})
+                return result
             progress("Checking nutrition coverage")
-            result.update(process_research(data_dir, worker=worker, progress=progress))
+            result.update(
+                process_research(data_dir, worker=worker, run_id=run, progress=progress)
+            )
             progress("Updating analytics")
             report = read_analytics(data_dir, date(today.year, 1, 1), today, compare=False)
             result["coverage_after"] = report["nutrient_coverage"]
@@ -279,6 +395,7 @@ def run_update(
             review_ids |= {
                 f["source_food_id"] for f in report["data_quality"]["foods"] if f["review_flags"]
             }
+            review_ids |= {row["source_food_id"] for row in latest_research_issues(data_dir)}
             result["needs_review"] = len(review_ids)
             result["analytics_refreshed"] = True
             result["status"] = (
@@ -322,4 +439,4 @@ def main(argv=None):
             f"Needs review: {result.get('needs_review', 'not calculated')}; unresolved: {result['unresolved']}."
         )
         print(result.get("error") or result["research_capability"])
-    return 2 if result["status"] == "failed" else 0
+    return 3 if result["status"] == "reconnect_required" else 2 if result["status"] == "failed" else 0

@@ -57,9 +57,11 @@ upstream loseit-mcp service -> phitoduck/lose-it -> private Lose It! GWT-RPC
 loseit-sync -> exact raw JSON + normalized SQLite rows + enrichment queue
 ```
 
-Normal synchronization uploads no diary contents to any third party. It only
-contacts Lose It! and writes locally. There is no telemetry. Internet research
-is not automatic.
+Normal synchronization uploads no diary contents to any third party: the core
+sync contacts only Lose It and writes locally. There is no telemetry. An
+explicitly configured USDA FoodData Central provider may receive normalized
+food/brand search terms during the separate research stage; it never receives
+diary records, Lose It credentials, dates, meals, or account metadata.
 
 ## Install
 
@@ -74,28 +76,33 @@ uv run pytest
 
 ## Authentication
 
-Session-token authentication is recommended; plaintext passwords are not
-needed. Never paste credentials into an AI chat or put a token on a command
-line, where shell history and process listings can expose it.
+The normal flow does not store a Lose It password:
 
-1. Sign in to `https://www.loseit.com/` in your browser.
-2. Open browser developer tools, choose **Application** (Chrome/Edge) or
-   **Storage** (Firefox), then **Cookies** → `https://www.loseit.com`.
-3. Copy the value of the `liauth` cookie. It is a bearer credential.
-4. From this repository, run:
+1. Open the local dashboard.
+2. Click **Update My Nutrition Data**.
+3. If prompted, sign in to Lose It in Chrome or Brave and click
+   **Reconnect Lose It**. Choose a browser profile when more than one exists.
+4. The dashboard validates the imported browser session with one read-only
+   request, stores it owner-only, and resumes the interrupted update.
 
-   ```bash
-   uv run loseit-mcp import-token
-   ```
+The import uses the upstream SDK's supported Chrome/Brave cookie-store reader.
+macOS may show a Keychain permission dialog. Profile listing is local-only and
+does not decrypt cookies; cookie access happens only after the explicit reconnect
+button. Tokens are never shown after import or returned in dashboard results.
 
-5. Paste at the hidden terminal prompt. The command writes
-   `~/.config/loseit-readonly/liauth` with owner-only mode `0600`.
-6. Verify without changing the account:
+Manual token paste remains a masked dashboard fallback. For developer/CLI use:
 
-   ```bash
-   uv run loseit-mcp whoami
-   uv run loseit-mcp status
-   ```
+```bash
+uv run loseit-mcp import-token
+```
+
+This writes `~/.config/loseit-readonly/liauth` with owner-only mode `0600`.
+Verify without changing the account:
+
+```bash
+uv run loseit-mcp whoami
+uv run loseit-mcp status
+```
 
 An alternate token file can be selected with `LOSEIT_TOKEN_FILE`. A token may
 also be supplied as `LOSEIT_TOKEN`, but environment variables are more likely
@@ -107,6 +114,12 @@ fallback in the low-level service, but the read-only CLI does not accept a
 password flag and the example configuration does not encourage password
 storage. Tokens and session caches are never printed to normal logs. Permissive
 POSIX token-file permissions are rejected.
+
+`liauth` is a JWT bearer session with an expiry time and no refresh token. A
+currently signed-in browser is therefore the password-free renewal source. If
+neither Chrome nor Brave has a current Lose It session, sign in there first or
+use the masked token fallback. The dashboard never asks for or stores a Lose It
+password.
 
 ## Run the MCP
 
@@ -623,7 +636,40 @@ its local forms, uploads, tables, charts and AppTest support avoid a separate
 frontend build. Analytics pages import the reusable analytics, research queue,
 proposal and repository services. Authentication is lazily loaded only after the
 explicit Update action enters `update.live_service`; ordinary page loads do not
-access `liauth` or the network.
+contact Lose It or a research provider. The connection badge reads only local
+token expiry metadata and credential-free update history; there is no polling.
+
+Normal use is intentionally short:
+
+1. Open the dashboard.
+2. Click **Update My Nutrition Data**.
+3. Reconnect Lose It only when prompted.
+4. Review genuine exceptions in **Review & Enrichment**.
+
+An interrupted update is safe to replay: completed date windows remain
+checkpointed, and successful reconnection automatically starts the same
+idempotent operation again.
+
+### One-time nutrition research setup
+
+USDA FoodData Central is the optional general research provider. In
+**Settings & Targets → Nutrition Research**, follow **Get a free FoodData
+Central API key**, paste the key into the masked field, and save it once. The
+[USDA API guide](https://fdc.nal.usda.gov/api-guide/) says a data.gov key is
+required on every request and must not be published. Its data are public
+domain/CC0, the default limit is 1,000 requests per hour, and
+[branded records](https://fdc.nal.usda.gov/data-documentation/) are updated
+monthly from food-industry label data.
+
+The provider sends only normalized food/brand search terms and accepts only an
+exact normalized name plus exact brand owner/name for branded foods. Ambiguity,
+conflicting identities, missing portion reconciliation, malformed data,
+timeouts, and branded-to-generic substitutions fail closed. Evidence retains
+its FoodData Central URL, retrieval date, product identity, 100 g basis,
+nutrients, and source type. It does not weaken `exact-label-v1`: USDA database
+evidence normally becomes a review proposal unless direct manufacturer/retailer
+label requirements are independently met. Missing provider configuration never
+blocks Lose It synchronization.
 
 ### Companion theme tokens
 
@@ -666,7 +712,8 @@ the workout app is not modified.
   current 2026 records).
 - **Settings & Targets:** optional protein, calorie range, fiber, sodium upper
   target and sugar upper target. Empty is unconfigured; there are no personal
-  defaults or recommendations. Adherence uses eligible complete days only.
+  defaults or recommendations. Adherence uses eligible complete days only. This
+  section also holds the masked, one-time USDA provider configuration.
 
 Presets: last 7/14/30 days, current month, YTD and custom inclusive dates. All
 existing incomplete-data and local-calendar semantics still apply. In particular,
@@ -756,9 +803,13 @@ storage. Schema migration occurs only on an explicit local write action; opening
 dashboard analytics against schema 1–3 remains read-only with no auth requirement.
 
 Schema 5 adds append-only `update_events` and `research_decisions`, and records
-the actor on proposal decisions and enrichment versions. Migration still occurs
-only after a successful remote preflight reaches an explicit write (or another
-explicit local write action).
+the actor on proposal decisions and enrichment versions. Migration occurs only
+during an explicit update/reconnect outcome or another explicit local write.
+
+Schema 6 adds append-only `research_attempts`. It stores only stable source food
+ID, provider, sanitized outcome/provenance, content hash, and timestamp—never a
+provider key, Lose It credential, diary payload, meal, or account field.
+Duplicate identical outcomes are ignored; update/delete triggers protect history.
 
 `insights.generate_insights` produces up to five deterministic factual statements
 using analytics outputs: configured protein adherence, valid prior-period calorie
@@ -774,9 +825,9 @@ proposals stay local; data is stored in the existing private repository and neve
 committed. The launcher's error boundary avoids displaying diary-bearing tracebacks.
 Private reports remain gitignored. Fixture research is never approved against a
 real repository. Update errors are redacted at the worker/UI boundary. A failed
-preflight writes nothing; a later chunk failure preserves completed windows and
-records a credential-free failure status for safe retry. No file/drop-folder
-watcher is installed.
+authentication preflight records only `reconnect_required`; a later chunk failure
+preserves completed windows and records a credential-free failure status for safe
+retry. No file/drop-folder watcher is installed.
 
 ## Analysis readiness
 
@@ -798,7 +849,10 @@ cd /absolute/path/to/loseit-readonly && uv run loseit-update
 `loseit-update` performs its own bounded windows and checkpoints. Re-running does
 not duplicate diary, weight, proposal, decision or enrichment rows. Raw snapshots
 are content-addressed, so an unchanged response is not duplicated while a changed
-upstream day is preserved as a new snapshot.
+upstream day is preserved as a new snapshot. Unattended runs never prompt for
+secrets: they exit with `reconnect_required` (CLI exit 3) when human browser
+reconnection is needed, and continue syncing with research marked unavailable
+when the optional provider is not configured. No scheduler is installed here.
 
 ## Privacy and backups
 

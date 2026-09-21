@@ -11,6 +11,7 @@ import streamlit as st
 
 from loseit_mcp.analytics import period_dates, read_analytics
 from loseit_mcp.coverage import read_coverage
+from loseit_mcp.credentials import save_usda_api_key, usda_configuration
 from loseit_mcp.insights import trend_series
 from loseit_mcp.proposals import (
     ProposalError,
@@ -24,9 +25,15 @@ from loseit_mcp.proposals import (
     review_proposal,
     save_settings,
 )
+from loseit_mcp.reconnect import (
+    browser_profiles,
+    connection_status,
+    reconnect_from_browser,
+    reconnect_with_token,
+)
 from loseit_mcp.research_queue import read_research_queue
 from loseit_mcp.theme import chart_config, css, load_theme
-from loseit_mcp.update import latest_update, run_update
+from loseit_mcp.update import latest_research_issues, latest_update, run_update
 
 THEME = load_theme()
 COLORS = THEME["colors"]
@@ -71,6 +78,71 @@ def table(rows):
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     else:
         st.caption("No records in this view.")
+
+
+def execute_update(data_dir):
+    """Run the one reusable operation and retain only its credential-free result."""
+    with st.status("Updating nutrition data", expanded=True) as status:
+        result = run_update(data_dir, progress=st.write)
+        reconnect = result["status"] == "reconnect_required"
+        failed = result["status"] == "failed"
+        status.update(
+            label="Reconnect needed" if reconnect else "Update stopped" if failed else "Update finished",
+            state="error" if reconnect or failed else "complete",
+            expanded=False,
+        )
+    st.session_state["update_result"] = result
+    st.session_state["resume_update"] = reconnect
+    return result
+
+
+def reconnect_panel(data_dir):
+    """Explicit browser import with a masked paste fallback; success resumes update."""
+    st.warning("Lose It connection expired")
+    st.caption(
+        "Sign in to Lose It in Chrome or Brave, then import that browser session. "
+        "The dashboard never stores your Lose It password."
+    )
+    st.link_button("Open Lose It sign-in", "https://www.loseit.com/login/")
+    browser = st.selectbox("Signed-in browser", ["chrome", "brave"], format_func=str.title)
+    profiles = browser_profiles(browser)
+    options = [row["directory"] for row in profiles] or [None]
+    labels = {None: "Scan browser profiles"}
+    labels.update(
+        {
+            row["directory"]: (
+                f"{row['name']} · {row['directory']}" if row["name"] else row["directory"]
+            )
+            for row in profiles
+        }
+    )
+    profile = st.selectbox("Browser profile", options, format_func=labels.get)
+    st.caption("macOS may ask permission to unlock the selected browser cookie store.")
+    if st.button("Reconnect Lose It", type="primary"):
+        outcome = reconnect_from_browser(browser, profile)
+        if outcome["status"] == "connected":
+            st.success(outcome["message"] + " Continuing the interrupted update…")
+            st.session_state["resume_update"] = False
+            execute_update(data_dir)
+        else:
+            st.error(outcome["message"])
+    with st.expander("Use a session token instead"):
+        st.caption(
+            "Fallback only: copy the liauth cookie from a signed-in Lose It browser session."
+        )
+        with st.form("manual_liauth_form"):
+            token = st.text_input("liauth", type="password", key="manual_liauth")
+            submitted = st.form_submit_button("Save and continue update")
+        if submitted:
+            outcome = reconnect_with_token(token)
+            st.session_state.pop("manual_liauth", None)
+            token = ""
+            if outcome["status"] == "connected":
+                st.success(outcome["message"] + " Continuing the interrupted update…")
+                st.session_state["resume_update"] = False
+                execute_update(data_dir)
+            else:
+                st.error(outcome["message"])
 
 
 def apply_action(callback, message):
@@ -360,6 +432,21 @@ def review(data_dir, report):
             st.success("No missing standard-nutrient research items.")
         return
     if subview == "Needs Review":
+        provider_issues = latest_research_issues(data_dir)
+        if provider_issues:
+            st.subheader("Research matches needing a decision")
+            table(
+                [
+                    {
+                        "Source food ID": row["source_food_id"],
+                        "Provider": row["provider"],
+                        "Issue": row["status"].replace("_", " "),
+                        "Why": row["summary"].get("message", "Review required"),
+                        "Checked": row["created_at"],
+                    }
+                    for row in provider_issues
+                ]
+            )
         flagged = [
             f for f in report["data_quality"]["foods"] if f["review_flags"] and f["source_food_id"]
         ]
@@ -602,6 +689,33 @@ def settings_view(data_dir, settings, report):
     table(
         [{"Metric": key, **value} for key, value in report["additional_target_adherence"].items()]
     )
+    st.subheader("Nutrition Research")
+    provider = usda_configuration()
+    st.write("Provider: USDA FoodData Central")
+    st.caption(
+        "Status: Configured" if provider["configured"] else "Status: Not configured"
+    )
+    st.caption(
+        "USDA branded records come from food-industry label data. Matches remain subject to "
+        "the conservative review policy; close names are never substituted."
+    )
+    st.link_button(
+        "Get a free FoodData Central API key",
+        "https://fdc.nal.usda.gov/api-key-signup/",
+    )
+    with st.form("usda_provider"):
+        key = st.text_input("FoodData Central API key", type="password", key="usda_key")
+        submitted = st.form_submit_button("Save provider configuration")
+    if submitted:
+        try:
+            save_usda_api_key(key)
+        except Exception:  # noqa: BLE001 - never echo provider-secret errors
+            st.error("The provider key was not saved. Check the value and local file permissions.")
+        else:
+            st.session_state.pop("usda_key", None)
+            key = ""
+            st.session_state["notice"] = "USDA FoodData Central research is configured."
+            st.rerun()
 
 
 def main():
@@ -619,6 +733,18 @@ def main():
     alt.theme.register("workout_companion", enable=True)(lambda: chart_config(THEME))
     st.sidebar.title("Nutrition")
     st.sidebar.caption("WORKOUT COMPANION · LOCAL NUTRITION")
+    connection = connection_status(args.data_dir)
+    st.sidebar.markdown(
+        "**Lose It · Connected**"
+        if connection["status"] == "connected"
+        else "**Lose It · Reconnect required**"
+    )
+    if connection["last_auth_check"]:
+        st.sidebar.caption("Last connection check: " + connection["last_auth_check"])
+    if connection["last_successful_update"]:
+        st.sidebar.caption("Last successful update: " + connection["last_successful_update"])
+    if connection["latest_diary_date"]:
+        st.sidebar.caption("Latest stored diary date: " + connection["latest_diary_date"])
     update_clicked = st.sidebar.button("Update My Nutrition Data", type="primary", width="stretch")
     section = st.sidebar.radio("Navigate", SECTIONS)
     preset = st.sidebar.selectbox("Date range", list(PRESETS))
@@ -635,24 +761,19 @@ def main():
         "Browsing and Refresh are local-only. Update explicitly reads Lose It and runs the controlled evidence worker. No background polling."
     )
     if update_clicked:
-        with st.status("Updating nutrition data", expanded=True) as status:
-            result = run_update(args.data_dir, progress=st.write)
-            status.update(
-                label="Update stopped" if result["status"] == "failed" else "Update finished",
-                state="error" if result["status"] == "failed" else "complete",
-                expanded=False,
-            )
-        st.session_state["update_result"] = result
+        execute_update(args.data_dir)
     result = st.session_state.get("update_result") or latest_update(args.data_dir)
     if result:
-        if result["status"] == "failed":
+        if result["status"] == "reconnect_required":
+            reconnect_panel(args.data_dir)
+        elif result["status"] == "failed":
             st.error(result.get("error", "Update stopped; retry when the connection is restored."))
         else:
             st.success(
                 f"Data updated through {result['through_date']} · {result['occurrences_added']} new entries · {result['weights_added']} new weights"
             )
             st.caption(
-                f"{result['foods_checked']} foods checked · {result['automatically_enriched']} automatically enriched · {result['nutrients_filled']} nutrients filled · {result.get('needs_review', 0)} need review · {result['unresolved']} unresolved · {result['failures']} research failures"
+                f"{result['foods_checked']} foods checked · {result['automatically_enriched']} automatically enriched · {result['nutrients_filled']} nutrients filled · {result.get('needs_review', 0)} need review · {result['unresolved']} unresolved · {result.get('research_unavailable', 0)} research unavailable · {result['failures']} research failures"
             )
             if result["unresolved"]:
                 st.info(result["research_capability"])
