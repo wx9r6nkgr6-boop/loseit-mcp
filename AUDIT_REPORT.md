@@ -1,5 +1,8 @@
 # Implementation and security audit
 
+> Historical baseline audit. See `AUTOMATION_RECONCILIATION_AUDIT.md` for the
+> current scheduling, reconciliation, completion-state, review and static-export pass.
+
 Date: 2026-09-04
 
 ## 1. Overall disposition
@@ -16,7 +19,7 @@ ordinary CLI are read-only by construction.
 | No AI-visible mutations | Complete; exact seven-tool allowlist plus startup assertion |
 | Inclusive date range, maximum 31 days | Complete |
 | Persistent raw/normalized/enriched repository | Complete; SQLite canonical plus raw JSON files |
-| Weekly/monthly/manual readiness | Complete; idempotent CLI, no scheduler installed |
+| Weekly/monthly/manual readiness | Historical baseline; native scheduling added in the later automation audit |
 | Prefer session token and protect secrets | Complete; hidden token import, mode 0600, permissive modes rejected |
 | Preserve food-text sanitization | Complete and regression-tested |
 | Faithful missing nutrients | Complete; absence remains absence, coverage is explicit |

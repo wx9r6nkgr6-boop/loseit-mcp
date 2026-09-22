@@ -104,7 +104,7 @@ def test_update_happy_path_repeat_history_and_analytics(tmp_path):
         tmp_path, service_factory=factory(), worker=Worker(), today=TODAY, progress=stages.append
     )
     assert first["status"] == "complete"
-    assert first["occurrences_added"] == 7 and first["weights_added"] == 1
+    assert first["occurrences_added"] == 8 and first["weights_added"] == 1
     assert first["automatically_enriched"] == first["nutrients_filled"] == 1
     assert first["analytics_refreshed"] and first["needs_review"] == 0
     assert first["through_date"] == TODAY.isoformat() and first["integrity"] == "ok"

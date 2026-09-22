@@ -417,6 +417,37 @@ def _quality_foods(rows, research):
     )
 
 
+def _completion_state(c, start, end):
+    """Return latest explicit source state per date; absence stays unknown."""
+    unavailable = {
+        "available": False,
+        "latest_completed_date": None,
+        "source_field": None,
+        "meaning": "Lose It explicit day-completion state is unavailable.",
+    }
+    if not _table(c, "day_completion_observations"):
+        return {}, unavailable
+    rows = c.execute(
+        """SELECT d.source_date,d.status,d.field_path FROM day_completion_observations d
+           JOIN (SELECT source_date,MAX(id) id FROM day_completion_observations GROUP BY source_date) x
+             ON x.id=d.id
+           WHERE d.source_date BETWEEN ? AND ? ORDER BY d.source_date""",
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+    states = {row["source_date"]: row["status"] for row in rows}
+    explicit = [row for row in rows if row["field_path"] and row["status"] != "unknown"]
+    if not explicit:
+        return states, unavailable
+    completed = [row["source_date"] for row in explicit if row["status"] == "complete"]
+    fields = sorted({row["field_path"] for row in explicit})
+    return states, {
+        "available": True,
+        "latest_completed_date": max(completed) if completed else None,
+        "source_field": fields[0] if len(fields) == 1 else fields,
+        "meaning": "Explicit boolean returned by Lose It; no activity-based completion inference.",
+    }
+
+
 def read_analytics(
     data_dir: Path,
     start: date,
@@ -482,12 +513,53 @@ def read_analytics(
             calorie_min,
             calorie_max,
         )
+        completion_by_day, completion = _completion_state(c, start, end)
+        for row in report["daily_metrics"]:
+            row["source_day_status"] = completion_by_day.get(row["date"], "unknown")
+        report["completion"] = completion
         if include_all_foods:
-            report["food_contributors"] = _foods([r for r in records if start.isoformat() <= r["source_date"] <= end.isoformat()], grouping, include_all=True)
+            report["food_contributors"] = _foods(
+                [r for r in records if start.isoformat() <= r["source_date"] <= end.isoformat()],
+                grouping,
+                include_all=True,
+            )
         from .insights import generate_insights, target_adherence
 
-        report["additional_target_adherence"] = target_adherence(report, {"fiber_target":fiber_target, "sodium_limit":sodium_limit, "sugar_target":sugar_target})
-        report["insights"] = generate_insights(report)
+        insight_report = report
+        latest_complete = completion["latest_completed_date"]
+        if completion["available"] and latest_complete and latest_complete < end.isoformat():
+            insight_report = _report(
+                records,
+                weights,
+                queue,
+                retrieved,
+                start,
+                date.fromisoformat(latest_complete),
+                compare,
+                period,
+                grouping,
+                protein_target,
+                calorie_min,
+                calorie_max,
+            )
+        report["insights_period"] = {
+            "start": insight_report["period"]["start"],
+            "end": insight_report["period"]["end"],
+            "basis": (
+                "explicitly_completed_days"
+                if completion["available"]
+                else "coverage_aware_fallback"
+            ),
+        }
+        report["additional_target_adherence"] = target_adherence(
+            insight_report,
+            {
+                "fiber_target": fiber_target,
+                "sodium_limit": sodium_limit,
+                "sugar_target": sugar_target,
+            },
+        )
+        report["insights"] = generate_insights(insight_report)
         report["app_summary"]["insight_slots"] = report["insights"]
         return report
     finally:

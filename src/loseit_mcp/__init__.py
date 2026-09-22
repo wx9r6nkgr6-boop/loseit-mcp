@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 
 def build_info() -> dict[str, str]:
@@ -23,4 +23,3 @@ def build_info() -> dict[str, str]:
 
 
 __all__ = ["__version__", "build_info"]
-

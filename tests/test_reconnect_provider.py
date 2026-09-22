@@ -418,9 +418,9 @@ def test_dashboard_shows_connection_reconnect_and_provider_configuration(tmp_pat
     assert key.proto.type == 1
 
 
-def test_schema_six_preserves_raw_immutability(tmp_path):
+def test_current_schema_preserves_raw_immutability(tmp_path):
     seed(tmp_path, [item()])
     with NutritionRepository(tmp_path) as repo:
-        assert repo.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 6
+        assert repo.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
         with pytest.raises(sqlite3.IntegrityError):
             repo.connection.execute("DELETE FROM raw_diary_snapshots")

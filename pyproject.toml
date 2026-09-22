@@ -1,6 +1,6 @@
 [project]
 name = "loseit-readonly-mcp"
-version = "0.7.0"
+version = "0.8.0"
 description = "Hardened read-only Lose It! MCP and local nutrition repository"
 readme = "README.md"
 license = "0BSD"
@@ -25,6 +25,8 @@ loseit-mcp = "loseit_mcp.cli:main"
 loseit-sync = "loseit_mcp.sync_cli:main"
 loseit-dashboard = "loseit_mcp.dashboard_cli:main"
 loseit-update = "loseit_mcp.update:main"
+loseit-schedule = "loseit_mcp.scheduler:main"
+loseit-publish = "loseit_mcp.publication:main"
 
 [build-system]
 requires = ["hatchling>=1.25"]

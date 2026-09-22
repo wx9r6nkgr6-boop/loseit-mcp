@@ -63,6 +63,27 @@ explicitly configured USDA FoodData Central provider may receive normalized
 food/brand search terms during the separate research stage; it never receives
 diary records, Lose It credentials, dates, meals, or account metadata.
 
+## Normal operation
+
+After one-time setup, nothing is normally required. Open the local dashboard,
+go to **Settings & Targets**, configure the iCloud snapshot folder, and click
+**Install automatic updates**. The Mac then runs the same authoritative update
+pipeline around 10:00 AM local time each day. It does not wake the Mac. A login
+or wake after 10:00 triggers one catch-up attempt; the daily gate prevents
+multiple redundant catch-ups.
+
+The normal pipeline is:
+
+```text
+read-only Lose It sync → reconcile today + prior 7 dates → conservative research
+→ safe auto-enrichment → Needs Your Help exceptions → analytics → iCloud snapshot
+```
+
+Optional: open the dashboard and click **Update My Nutrition Data** at any time.
+If attention is needed, open **Review & Enrichment → Needs Your Help** and answer
+the simple factual question or choose **I don't know**. On iPhone/iPad, open the
+latest `nutrition_dashboard.html` from the configured iCloud Drive folder.
+
 ## Install
 
 Python 3.12+ and [`uv`](https://docs.astral.sh/uv/) are recommended.
@@ -319,8 +340,9 @@ uv run loseit-sync --import-enrichment /private/path/reviewed-food.json
 uv run loseit-sync --research-queue
 ```
 
-Repeat manually, weekly or monthly; no scheduler is installed. The research
-queue itself opens SQLite in read-only/query-only mode, does not load credentials,
+This is an advanced deliberate workflow; normal scheduled updates use the
+configured research provider and Needs Your Help inbox. The research queue
+itself opens SQLite in read-only/query-only mode, does not load credentials,
 contact any service, migrate the database, or write enrichment. The JSON export
 contains food information: keep it private. Its default filename is gitignored.
 
@@ -641,14 +663,81 @@ token expiry metadata and credential-free update history; there is no polling.
 
 Normal use is intentionally short:
 
-1. Open the dashboard.
-2. Click **Update My Nutrition Data**.
+1. Usually do nothing; the Mac updates around 10:00 AM when available.
+2. Optionally click **Update My Nutrition Data**.
 3. Reconnect Lose It only when prompted.
-4. Review genuine exceptions in **Review & Enrichment**.
+4. Answer genuine ambiguities in **Review & Enrichment → Needs Your Help**.
+5. Open the published read-only HTML from iCloud Drive on iPhone/iPad.
 
 An interrupted update is safe to replay: completed date windows remain
 checkpointed, and successful reconnection automatically starts the same
 idempotent operation again.
+
+### Daily scheduling and recent-day reconciliation
+
+The dashboard can install, disable, re-enable, and uninstall a per-user macOS
+LaunchAgent. It binds no network service and runs `loseit_mcp.scheduler` with the
+same Python environment and repository path used at installation. `RunAtLoad`
+provides post-login catch-up while `StartCalendarInterval` requests 10:00 AM.
+The scheduler never asks macOS to wake the machine. The existing repository lock
+prevents overlap with manual updates and historical backfills.
+
+Every routine update re-reads **today plus the previous seven calendar days**,
+even if those dates were imported or marked complete before. Added/deleted foods,
+serving, meal, and nutrient changes update the current projection exactly once;
+content-addressed raw snapshots remain immutable for audit. Unchanged payloads do
+not create duplicate raw snapshots or current occurrences.
+
+Advanced recovery commands (not required for normal use):
+
+```bash
+uv run loseit-schedule status
+uv run loseit-schedule install
+uv run loseit-schedule disable
+uv run loseit-schedule enable
+uv run loseit-schedule uninstall
+```
+
+Automatic stdout/stderr files contain only credential-free summaries and live in
+the local repository's `logs/` folder.
+
+### Explicit completed-day state
+
+The stored real Lose It diary payloads and the currently used upstream SDK
+projection expose no explicit “done logging”/day-complete field. The observed
+top-level fields are date, entries/count, daily totals, total calories, and
+nutrient-coverage metadata; nutrient coverage `complete` describes whether
+entries reported a nutrient, not whether the user marked the day complete.
+Therefore this project does **not** infer completion from date, calories, foods,
+meals, time, or history.
+
+Schema v7 is future-ready: it records an explicit recognized source boolean and
+its field path per immutable raw snapshot if one appears later. Until then the
+dashboard labels completion as unavailable and keeps the prior coverage-aware
+insight behavior. When explicit state is available, live/current views still show
+all entries while completeness-sensitive insights end at the latest explicitly
+completed date. Rolling reconciliation still revisits completed days.
+
+### Read-only iCloud snapshot
+
+After a successful update and analytics refresh, publication writes only:
+
+- `nutrition_dashboard.html` — one responsive, self-contained read-only page.
+- `nutrition_snapshot.json` — a compact, versioned app-consumption document.
+
+The destination must resolve inside the current account's iCloud Drive and is
+configurable in **Settings & Targets**. Both outputs are staged and validated
+before atomic replacement, so a generation failure leaves the previous good
+snapshot intact. The export excludes the SQLite database, raw payloads, account
+credentials, provider credentials, research attempts, proposal internals, and
+administrative controls. The live dashboard remains bound to `127.0.0.1`; it is
+never exposed publicly for mobile access.
+
+JSON schema version 1 contains: generation/update freshness, selected period,
+insight period, explicit-completion availability, logging completeness, five
+core nutrient averages/coverage, recent daily usable totals and missing counts,
+meal summaries, a bounded food summary, weight summary, factual insights, and
+compact data-quality counts. Missing values remain JSON `null`, never zero.
 
 ### One-time nutrition research setup
 
@@ -704,13 +793,16 @@ the workout app is not modified.
 - **Coverage & Data Quality:** source and numeric combined coverage, missing
   standard nutrients, enrichment-filled gaps, contradictions and manual flags.
   Unknown nutrients are tucked behind an explicit advanced-details action.
-- **Review & Enrichment:** exception-first Needs Review inbox, automatic versus
-  human approval history, clear portion/evidence problems, minimal portion
-  confirmation, advanced manual import/editing, source annotations and history.
+- **Review & Enrichment:** a default **Needs Your Help** inbox asks one factual
+  quantity/identity question at a time, supports choices, numeric answers,
+  “I don't know” and defer, and stores append-only provenance. Technical proposal,
+  source annotation and evidence history remains available in a collapsed
+  Advanced section.
   Queue counts are repository-wide;
   contradiction/source selectors use the selected analytics period (YTD for all
   current 2026 records).
-- **Settings & Targets:** optional protein, calorie range, fiber, sodium upper
+- **Settings & Targets:** automatic-update install/status/disable controls,
+  iCloud snapshot configuration, optional protein, calorie range, fiber, sodium upper
   target and sugar upper target. Empty is unconfigured; there are no personal
   defaults or recommendations. Adherence uses eligible complete days only. This
   section also holds the masked, one-time USDA provider configuration.

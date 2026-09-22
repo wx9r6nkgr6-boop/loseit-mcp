@@ -13,7 +13,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Self
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SOURCE = "loseit"
 STANDARD_NUTRIENTS = (
     "calories",
@@ -325,7 +325,66 @@ MIGRATIONS = (
     CREATE TRIGGER research_attempts_no_update BEFORE UPDATE ON research_attempts BEGIN SELECT RAISE(ABORT,'Research attempts are append-only'); END;
     CREATE TRIGGER research_attempts_no_delete BEFORE DELETE ON research_attempts BEGIN SELECT RAISE(ABORT,'Research attempts are append-only'); END;
     """,
+    """
+    CREATE TABLE day_completion_observations (
+        id INTEGER PRIMARY KEY,
+        source_date TEXT NOT NULL,
+        raw_snapshot_id INTEGER NOT NULL UNIQUE REFERENCES raw_diary_snapshots(id),
+        status TEXT NOT NULL CHECK (status IN ('complete','incomplete','unknown')),
+        field_path TEXT,
+        observed_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_day_completion_date ON day_completion_observations(source_date,id);
+    CREATE TABLE automation_events (
+        id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, trigger TEXT NOT NULL,
+        stage TEXT NOT NULL, summary_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_automation_events ON automation_events(trigger,stage,id);
+    CREATE TABLE publication_settings_versions (
+        id INTEGER PRIMARY KEY, destination TEXT, enabled INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE publication_events (
+        id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL,
+        html_path TEXT, json_path TEXT, summary_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE human_review_answers (
+        id INTEGER PRIMARY KEY, source_food_id TEXT NOT NULL,
+        question_kind TEXT NOT NULL, context_sha256 TEXT NOT NULL,
+        answer_json TEXT NOT NULL, disposition TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_human_answers_food ON human_review_answers(source_food_id,id);
+    CREATE TRIGGER completion_no_update BEFORE UPDATE ON day_completion_observations BEGIN SELECT RAISE(ABORT,'Completion history is append-only'); END;
+    CREATE TRIGGER completion_no_delete BEFORE DELETE ON day_completion_observations BEGIN SELECT RAISE(ABORT,'Completion history is append-only'); END;
+    CREATE TRIGGER automation_no_update BEFORE UPDATE ON automation_events BEGIN SELECT RAISE(ABORT,'Automation history is append-only'); END;
+    CREATE TRIGGER automation_no_delete BEFORE DELETE ON automation_events BEGIN SELECT RAISE(ABORT,'Automation history is append-only'); END;
+    CREATE TRIGGER publication_settings_no_update BEFORE UPDATE ON publication_settings_versions BEGIN SELECT RAISE(ABORT,'Publication settings are append-only'); END;
+    CREATE TRIGGER publication_settings_no_delete BEFORE DELETE ON publication_settings_versions BEGIN SELECT RAISE(ABORT,'Publication settings are append-only'); END;
+    CREATE TRIGGER publication_no_update BEFORE UPDATE ON publication_events BEGIN SELECT RAISE(ABORT,'Publication history is append-only'); END;
+    CREATE TRIGGER publication_no_delete BEFORE DELETE ON publication_events BEGIN SELECT RAISE(ABORT,'Publication history is append-only'); END;
+    CREATE TRIGGER human_answers_no_update BEFORE UPDATE ON human_review_answers BEGIN SELECT RAISE(ABORT,'Human answers are append-only'); END;
+    CREATE TRIGGER human_answers_no_delete BEFORE DELETE ON human_review_answers BEGIN SELECT RAISE(ABORT,'Human answers are append-only'); END;
+    """,
 )
+
+
+_EXPLICIT_COMPLETION_FIELDS = (
+    "is_complete",
+    "is_completed",
+    "day_complete",
+    "day_completed",
+    "done_logging",
+)
+
+
+def explicit_completion(day: dict[str, Any]) -> tuple[str, str | None]:
+    """Return only an explicit source boolean; never infer completion from activity."""
+    for key in _EXPLICIT_COMPLETION_FIELDS:
+        value = day.get(key)
+        if type(value) is bool:
+            return ("complete" if value else "incomplete", f"$.{key}")
+    return "unknown", None
 
 
 class NutritionRepository:
@@ -406,7 +465,9 @@ class NutritionRepository:
     def ingest_range(self, payload: dict[str, Any], *, retrieved_at: str | None = None) -> dict[str, int]:
         retrieved = retrieved_at or _now()
         summary = {"days": 0, "raw_snapshots_added": 0, "occurrences_added": 0,
-                   "occurrences_seen": 0, "enrichments_reused": 0, "queued": 0}
+                   "occurrences_seen": 0, "occurrences_removed": 0,
+                   "occurrences_changed": 0, "changed_days": 0, "unchanged_days": 0,
+                   "enrichments_reused": 0, "queued": 0}
         for day in payload.get("days") or []:
             result = self.ingest_day(day, retrieved_at=retrieved)
             summary["days"] += 1
@@ -420,8 +481,32 @@ class NutritionRepository:
         digest = hashlib.sha256(serialized.encode()).hexdigest()
         raw_file = self._write_raw_file(source_date, retrieved_at, digest, serialized)
         result = {"raw_snapshots_added": 0, "occurrences_added": 0, "occurrences_seen": 0,
+                  "occurrences_removed": 0, "occurrences_changed": 0,
+                  "changed_days": 0, "unchanged_days": 0,
                   "enrichments_reused": 0, "queued": 0}
         with self.connection:
+            prior_snapshot = self.connection.execute(
+                "SELECT content_sha256 FROM raw_diary_snapshots WHERE source=? AND source_date=? ORDER BY id DESC LIMIT 1",
+                (SOURCE, source_date),
+            ).fetchone()
+            prior_current = {
+                row["stable_key"]: dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM food_occurrences WHERE source=? AND source_date=? AND is_current=1",
+                    (SOURCE, source_date),
+                )
+            }
+            prior_nutrients: dict[int, dict[str, float]] = {}
+            for row in self.connection.execute(
+                """SELECT n.occurrence_id,n.nutrient,n.value FROM nutrient_observations n
+                   JOIN food_occurrences o ON o.id=n.occurrence_id
+                   WHERE o.source=? AND o.source_date=? AND o.is_current=1
+                     AND n.provenance='loseit'""",
+                (SOURCE, source_date),
+            ):
+                prior_nutrients.setdefault(int(row["occurrence_id"]), {})[row["nutrient"]] = row[
+                    "value"
+                ]
             before = self.connection.total_changes
             self.connection.execute(
                 """INSERT OR IGNORE INTO raw_diary_snapshots
@@ -435,6 +520,14 @@ class NutritionRepository:
                 (SOURCE, source_date, digest),
             ).fetchone()
             assert snapshot is not None
+            changed = prior_snapshot is not None and prior_snapshot["content_sha256"] != digest
+            result["changed_days" if changed else "unchanged_days"] = 1
+            status, field_path = explicit_completion(day)
+            self.connection.execute(
+                """INSERT OR IGNORE INTO day_completion_observations
+                   (source_date,raw_snapshot_id,status,field_path,observed_at) VALUES (?,?,?,?,?)""",
+                (source_date, int(snapshot["id"]), status, field_path, retrieved_at),
+            )
             self.connection.execute(
                 "UPDATE food_occurrences SET is_current=0 WHERE source=? AND source_date=?",
                 (SOURCE, source_date),
@@ -445,15 +538,45 @@ class NutritionRepository:
                     source_date, position, entry, int(snapshot["id"]), retrieved_at
                 )
                 result["occurrences_added"] += added
+                stable_key = self._stable_key(source_date, position, entry)
+                previous = prior_current.get(stable_key)
+                if previous is not None:
+                    incoming_nutrients = dict(entry.get("nutrients") or {})
+                    if entry.get("calories") is not None:
+                        incoming_nutrients.setdefault("calories", entry["calories"])
+                    numeric_nutrients = {
+                        str(key): float(value)
+                        for key, value in incoming_nutrients.items()
+                        if isinstance(value, int | float) and not isinstance(value, bool)
+                    }
+                    if any(
+                        previous[key] != value
+                        for key, value in (
+                            ("meal", entry.get("meal")),
+                            ("amount", entry.get("amount")),
+                            ("unit", entry.get("unit")),
+                            ("servings", entry.get("servings")),
+                            ("source_food_id", entry.get("food_id")),
+                        )
+                    ) or prior_nutrients.get(int(previous["id"]), {}) != numeric_nutrients:
+                        result["occurrences_changed"] += 1
                 self.connection.execute(
                     "UPDATE food_occurrences SET is_current=1 WHERE stable_key=?",
-                    (self._stable_key(source_date, position, entry),),
+                    (stable_key,),
                 )
                 linked, queued = self._match_or_queue(
                     source_date, position, entry, increment_queue=bool(added)
                 )
                 result["enrichments_reused"] += linked
                 result["queued"] += queued
+            current_keys = {
+                row[0]
+                for row in self.connection.execute(
+                    "SELECT stable_key FROM food_occurrences WHERE source=? AND source_date=? AND is_current=1",
+                    (SOURCE, source_date),
+                )
+            }
+            result["occurrences_removed"] = len(set(prior_current) - current_keys)
         return result
 
     def _write_raw_file(self, source_date: str, retrieved_at: str, digest: str, payload: str) -> Path:

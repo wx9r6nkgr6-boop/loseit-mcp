@@ -7,6 +7,7 @@ research worker. Authentication is loaded only by the live-service factory.
 import argparse
 import fcntl
 import hashlib
+import inspect
 import json
 from contextlib import contextmanager
 from datetime import date, timedelta
@@ -25,7 +26,7 @@ from .proposals import (
     source_context,
 )
 from .reconnect import is_reconnect_error
-from .repository import NutritionRepository, _now
+from .repository import NutritionRepository, _json, _now
 from .research_queue import read_research_queue
 
 
@@ -62,7 +63,23 @@ def sync_window(repo, service, start, end, *, include_weights=True, request_dela
             )
         ):
             raise ValueError("Invalid weight window")
+        prior_hashes = {
+            row["source_date"]: row["content_sha256"]
+            for row in repo.connection.execute(
+                """SELECT r.source_date,r.content_sha256 FROM raw_diary_snapshots r
+                   JOIN (SELECT source_date,MAX(id) id FROM raw_diary_snapshots
+                         WHERE source_date BETWEEN ? AND ? GROUP BY source_date) x ON x.id=r.id""",
+                (start.isoformat(), end.isoformat()),
+            )
+        }
+        changed_dates = [
+            day["date"]
+            for day in days
+            if day["date"] in prior_hashes
+            and hashlib.sha256(_json(day).encode()).hexdigest() != prior_hashes[day["date"]]
+        ]
         summary = repo.ingest_range(payload, retrieved_at=_now())
+        summary["changed_dates"] = changed_dates
         if weights is not None:
             summary.update(repo.ingest_weights(weights, retrieved_at=_now()))
         repo.finish_sync(run_id, "ok", summary)
@@ -74,7 +91,8 @@ def sync_window(repo, service, start, end, *, include_weights=True, request_dela
 
 def next_start(data_dir, today):
     # Last fully completed sync, not the maximum diary date: a lone future/historical
-    # snapshot must never move a checkpoint. Replay last day to capture later edits.
+    # snapshot must never move a checkpoint. Always replay today plus the prior seven
+    # calendar days because Lose It diary dates remain editable after first import.
     with reader(data_dir) as c:
         row = c.execute("SELECT MAX(end_date) FROM sync_runs WHERE status='ok'").fetchone()
         previous = row[0]
@@ -84,7 +102,8 @@ def next_start(data_dir, today):
                 "SELECT MAX(end_date) FROM backfill_runs WHERE status='complete'"
             ).fetchone()
             previous = row[0]
-        return min(today, date.fromisoformat(previous)) if previous else today - timedelta(days=6)
+        reconciliation_start = today - timedelta(days=7)
+        return min(reconciliation_start, date.fromisoformat(previous)) if previous else reconciliation_start
 
 
 def latest_update(data_dir):
@@ -247,6 +266,12 @@ def process_research(data_dir, *, worker=None, run_id=None, progress=lambda text
             if getattr(worker, "requires_context", False):
                 keys.extend(("portion_variants", "missing_standard_nutrients"))
             request = {key: candidate[key] for key in keys}
+            if getattr(worker, "requires_context", False):
+                from .review_inbox import latest_answer
+
+                request["human_answer"] = latest_answer(
+                    data_dir, candidate["source_food_id"]
+                )
             evidence = worker.research(request)
             if evidence is None:
                 _research_event(
@@ -311,7 +336,14 @@ def process_research(data_dir, *, worker=None, run_id=None, progress=lambda text
 
 
 def run_update(
-    data_dir, *, service_factory=live_service, worker=None, today=None, progress=lambda text: None
+    data_dir,
+    *,
+    service_factory=live_service,
+    worker=None,
+    today=None,
+    progress=lambda text: None,
+    trigger="manual",
+    publish=False,
 ):
     data_dir = Path(data_dir).expanduser().resolve()
     if not (data_dir / "nutrition.sqlite3").is_file():
@@ -333,6 +365,13 @@ def run_update(
         "research_unavailable": 0,
         "unresolved": 0,
         "analytics_refreshed": False,
+        "trigger": trigger,
+        "reconciliation_start": None,
+        "recent_dates_rechecked": 0,
+        "changed_recent_days": 0,
+        "occurrences_removed": 0,
+        "occurrences_changed": 0,
+        "static_snapshot": {"status": "not_requested", "published_at": None},
         "research_capability": getattr(worker, "capability", "Configured worker"),
     }
     run = str(uuid4())
@@ -357,6 +396,9 @@ def run_update(
                     )
                     result["coverage_before"] = before["nutrient_coverage"]
                     start = next_start(data_dir, today)
+                    result["reconciliation_start"] = max(
+                        start, today - timedelta(days=7)
+                    ).isoformat()
                     _event(data_dir, run, "started", {"requested_through": today.isoformat()})
                     started = True
                     while start <= today:
@@ -364,8 +406,17 @@ def run_update(
                         progress(f"Syncing Lose It · {start} through {end}")
                         with NutritionRepository(data_dir) as repo:
                             summary = sync_window(repo, service, start, end)
-                        for key in ("occurrences_added", "weights_added"):
+                        for key in (
+                            "occurrences_added",
+                            "weights_added",
+                            "occurrences_removed",
+                            "occurrences_changed",
+                        ):
                             result[key] += summary.get(key, 0)
+                        result["changed_recent_days"] += sum(
+                            changed >= today - timedelta(days=7)
+                            for changed in map(date.fromisoformat, summary["changed_dates"])
+                        )
                         result["through_date"] = end.isoformat()
                         _event(data_dir, run, "sync_checkpoint", result)
                         start = end + timedelta(days=1)
@@ -398,6 +449,7 @@ def run_update(
             review_ids |= {row["source_food_id"] for row in latest_research_issues(data_dir)}
             result["needs_review"] = len(review_ids)
             result["analytics_refreshed"] = True
+            result["recent_dates_rechecked"] = 8
             result["status"] = (
                 "complete_with_unresolved"
                 if result["unresolved"] or result["needs_review"]
@@ -405,6 +457,13 @@ def run_update(
             )
             with reader(data_dir) as c:
                 result["integrity"] = c.execute("PRAGMA integrity_check").fetchone()[0]
+            if publish:
+                progress("Publishing read-only iCloud snapshot")
+                from .publication import publish_snapshot
+
+                result["static_snapshot"] = publish_snapshot(
+                    data_dir, run_id=run, today=today, data_updated_at=_now()
+                )
             _event(data_dir, run, "finished", result)
             return result
         except Exception:  # noqa: BLE001 - redact failures at UI/CLI boundary
@@ -426,7 +485,8 @@ def main(argv=None):
     parser.add_argument("--data-dir", type=Path, default=default_data_dir())
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    result = run_update(args.data_dir)
+    options = {"publish": True} if "publish" in inspect.signature(run_update).parameters else {}
+    result = run_update(args.data_dir, **options)
     if args.json:
         print(json.dumps(result, allow_nan=False))
     else:

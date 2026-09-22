@@ -1,6 +1,7 @@
 """Streamlit presentation: nutrition, insights and review rules stay in reusable services."""
 
 import argparse
+import inspect
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,11 @@ from loseit_mcp.proposals import (
     review_proposal,
     save_settings,
 )
+from loseit_mcp.publication import (
+    publication_settings,
+    publication_status,
+    save_publication_settings,
+)
 from loseit_mcp.reconnect import (
     browser_profiles,
     connection_status,
@@ -32,6 +38,12 @@ from loseit_mcp.reconnect import (
     reconnect_with_token,
 )
 from loseit_mcp.research_queue import read_research_queue
+from loseit_mcp.review_inbox import answer_question, needs_help, recent_answers
+from loseit_mcp.scheduler import disable as disable_schedule
+from loseit_mcp.scheduler import enable as enable_schedule
+from loseit_mcp.scheduler import install as install_schedule
+from loseit_mcp.scheduler import status as schedule_status
+from loseit_mcp.scheduler import uninstall as uninstall_schedule
 from loseit_mcp.theme import chart_config, css, load_theme
 from loseit_mcp.update import latest_research_issues, latest_update, run_update
 
@@ -83,7 +95,10 @@ def table(rows):
 def execute_update(data_dir):
     """Run the one reusable operation and retain only its credential-free result."""
     with st.status("Updating nutrition data", expanded=True) as status:
-        result = run_update(data_dir, progress=st.write)
+        options = {"progress": st.write}
+        if "publish" in inspect.signature(run_update).parameters:
+            options.update(trigger="manual", publish=True)
+        result = run_update(data_dir, **options)
         reconnect = result["status"] == "reconnect_required"
         failed = result["status"] == "failed"
         status.update(
@@ -160,7 +175,44 @@ def apply_action(callback, message):
     st.rerun()
 
 
-def overview(report):
+def overview(report, data_dir, connection):
+    automation = schedule_status(data_dir)
+    publication = publication_status(data_dir)
+    questions = needs_help(data_dir)
+    st.subheader("System status")
+    status_cards = st.columns(4)
+    status_cards[0].metric(
+        "Lose It connection",
+        "Connected" if connection["status"] == "connected" else "Reconnect needed",
+    )
+    status_cards[1].metric("Latest diary date", connection["latest_diary_date"] or "Unavailable")
+    status_cards[2].metric("Automatic updates", "On" if automation["enabled"] else "Off")
+    status_cards[3].metric("Needs your help", len(questions))
+    latest_auto = automation["last_automatic"] or {}
+    latest_publish = publication["latest"] or {}
+    st.caption(
+        " · ".join(
+            (
+                "Last successful update: " + (connection["last_successful_update"] or "none yet"),
+                "Last automatic update: " + (latest_auto.get("completed_at") or "none yet"),
+                "Next expected update: " + automation["next_expected_run"],
+                "Static snapshot: " + latest_publish.get("status", "not published"),
+                "Last published: " + (latest_publish.get("published_at") or "none yet"),
+            )
+        )
+    )
+    completion = report["completion"]
+    if completion["available"]:
+        st.caption(
+            "Last day marked complete in Lose It: "
+            + (completion["latest_completed_date"] or "No completed day in this view")
+            + " · Insights through "
+            + report["insights_period"]["end"]
+        )
+    else:
+        st.caption(
+            "Lose It did not expose an explicit completed-day state; insights retain coverage-aware fallback behavior."
+        )
     logging = report["logging_completeness"]
     cards = st.columns(4)
     cards[0].metric("Logged days", f"{logging['logged_days']} / {logging['calendar_days']}")
@@ -395,6 +447,69 @@ def coverage(report, data_dir):
 
 
 def review(data_dir, report):
+    questions = needs_help(data_dir)
+    st.subheader("Needs Your Help")
+    st.write(
+        f"{len(questions)} item{'s' if len(questions) != 1 else ''} need your input."
+        if questions
+        else "Nothing needs your input right now."
+    )
+    st.caption(
+        "Answer only what you remember. ‘I don't know’ preserves uncertainty and never invents nutrition."
+    )
+    for index, question in enumerate(questions):
+        with st.container(border=True):
+            st.subheader(question["food_name"])
+            if question["brand"]:
+                st.caption(question["brand"])
+            st.write(question["question"])
+            columns = st.columns(max(1, len(question["choices"]) + 1))
+            for column, choice in zip(columns, question["choices"], strict=False):
+                if column.button(
+                    choice["label"], key=f"help_{index}_{choice['value']}", type="primary"
+                ):
+                    apply_action(
+                        lambda q=question, value=choice["value"]: answer_question(
+                            data_dir, q, value
+                        ),
+                        "Thanks — your factual answer was saved for the next safe research pass.",
+                    )
+            with st.expander("Something else"), st.form(f"help_other_{index}"):
+                amount = st.number_input(
+                    f"Actual {question['unit']}", min_value=0.01, value=None
+                )
+                if st.form_submit_button("Save answer"):
+                    apply_action(
+                        lambda q=question, value=amount: answer_question(data_dir, q, value),
+                        "Thanks — your factual answer was saved for the next safe research pass.",
+                    )
+            actions = st.columns(2)
+            if actions[0].button("I don't know", key=f"help_unknown_{index}"):
+                apply_action(
+                    lambda q=question: answer_question(
+                        data_dir, q, None, disposition="unknown"
+                    ),
+                    "Uncertainty saved; no nutrition values were changed.",
+                )
+            if actions[1].button("Ask me later", key=f"help_defer_{index}"):
+                apply_action(
+                    lambda q=question: answer_question(
+                        data_dir, q, None, disposition="deferred"
+                    ),
+                    "Deferred safely; no nutrition values were changed.",
+                )
+            with st.expander("Why am I being asked? · Advanced details"):
+                st.write(question["why"])
+                st.json(question["advanced"])
+    answered = recent_answers(data_dir)
+    if answered:
+        with st.expander("Recently answered or deferred"):
+            table(answered)
+    with st.expander("Advanced research and provenance tools"):
+        _advanced_review(data_dir, report)
+
+
+def _advanced_review(data_dir, report):
     queue = read_research_queue(data_dir)
     proposals = list_proposals(data_dir)
     st.caption(
@@ -689,6 +804,44 @@ def settings_view(data_dir, settings, report):
     table(
         [{"Metric": key, **value} for key, value in report["additional_target_adherence"].items()]
     )
+    st.subheader("Automatic daily update")
+    automation = schedule_status(data_dir)
+    st.write("On" if automation["enabled"] else "Off")
+    st.caption("Runs around 10:00 AM local time. A missed run catches up once after login/wake.")
+    st.caption("Next expected run: " + automation["next_expected_run"])
+    schedule_buttons = st.columns(3)
+    if schedule_buttons[0].button(
+        "Install automatic updates", disabled=automation["installed"]
+    ):
+        apply_action(
+            lambda: install_schedule(data_dir),
+            "Automatic daily updates installed and enabled.",
+        )
+    if schedule_buttons[1].button(
+        "Disable" if automation["enabled"] else "Re-enable",
+        disabled=not automation["installed"],
+    ):
+        callback = disable_schedule if automation["enabled"] else lambda: enable_schedule(data_dir)
+        apply_action(callback, "Automatic update schedule changed.")
+    if schedule_buttons[2].button("Uninstall", disabled=not automation["installed"]):
+        apply_action(uninstall_schedule, "Automatic update schedule removed; nutrition data kept.")
+    st.subheader("iCloud read-only snapshot")
+    publishing = publication_settings(data_dir)
+    with st.form("snapshot_settings"):
+        destination = st.text_input(
+            "iCloud Drive folder",
+            value=publishing["destination"] or "",
+            placeholder="Choose a folder inside iCloud Drive",
+        )
+        enabled = st.checkbox("Publish after successful updates", value=publishing["enabled"])
+        if st.form_submit_button("Save snapshot settings"):
+            apply_action(
+                lambda: save_publication_settings(data_dir, destination or None, enabled),
+                "Read-only snapshot settings saved.",
+            )
+    st.caption(
+        "Only sanitized finished analytics are published. The local database, credentials, raw diary and research internals remain on this Mac."
+    )
     st.subheader("Nutrition Research")
     provider = usda_configuration()
     st.write("Provider: USDA FoodData Central")
@@ -758,7 +911,7 @@ def main():
     grouping = "name" if st.sidebar.checkbox("Group by normalized name + brand") else "id"
     st.sidebar.button("Refresh local data")
     st.sidebar.caption(
-        "Browsing and Refresh are local-only. Update explicitly reads Lose It and runs the controlled evidence worker. No background polling."
+        "Browsing and Refresh are local-only. Updates read Lose It only after a manual action or the installed daily schedule; there is no background polling."
     )
     if update_clicked:
         execute_update(args.data_dir)
@@ -793,7 +946,7 @@ def main():
             **settings,
         )
         if section == "Overview":
-            overview(report)
+            overview(report, args.data_dir, connection)
         elif section == "Trends":
             trends(report)
         elif section == "Meals":
