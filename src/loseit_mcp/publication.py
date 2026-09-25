@@ -13,9 +13,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from .analytics import period_dates, read_analytics
+from .metric_engine import prominent_keys, read_metric_dashboard
 from .proposals import read_settings, reader
 from .repository import NutritionRepository, _now
 from .resolved import library_status
+from .review_inbox import needs_help
 
 SNAPSHOT_SCHEMA_VERSION = 1
 HTML_NAME = "nutrition_dashboard.html"
@@ -26,7 +28,26 @@ FORBIDDEN_EXPORT_MARKERS = (
     "api_key",
     "raw_diary_snapshots",
     "research_attempts",
+    "authorization",
+    "access_token",
+    "refresh_token",
+    "password",
+    "set-cookie",
+    "bearer ",
 )
+
+
+def _check_snapshot_keys(value) -> None:
+    forbidden = {"cookie", "cookies", "auth_header", "headers", "token",
+                 "payload_json", "raw_payload", "secret"}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).casefold() in forbidden:
+                raise ValueError("Snapshot contains a sensitive field")
+            _check_snapshot_keys(child)
+    elif isinstance(value, list):
+        for child in value:
+            _check_snapshot_keys(child)
 
 
 def default_destination() -> Path | None:
@@ -88,6 +109,7 @@ def build_snapshot(
     *,
     generated_at: str | None = None,
     data_updated_at: str | None = None,
+    today: date | None = None,
 ) -> dict:
     """Project finished analytics into a deliberately small, stable schema."""
     generated = generated_at or _now()
@@ -145,6 +167,10 @@ def build_snapshot(
         "foods": foods,
         "weight": report["weight_summary"],
         "insights": report["insights"],
+        "metric_views": {
+            period: read_metric_dashboard(data_dir, period, today=today)
+            for period in ("current_week", "last_week", "rolling_30")
+        },
         "data_quality": {
             "research_items": report["data_quality"]["research_queue_count_global"],
             "source_gap_occurrences": report["data_quality"]["source_gap_occurrences"],
@@ -153,7 +179,8 @@ def build_snapshot(
             ],
             "resolved_library_foods": library["canonical_foods"],
             "formulations": library["formulations"],
-            "active_anomalies": library["active_anomalies"],
+            "historical_anomaly_findings": library["historical_anomaly_findings"],
+            "needs_your_help": len(needs_help(data_dir)),
             "invalid_source_nutrient_fields": library["invalid_source_nutrient_fields"],
             "last_audits": {
                 name: detail["completed_at"] if detail else None
@@ -168,6 +195,67 @@ def _display(value, suffix=""):
 
 
 def render_html(snapshot: dict) -> str:
+    metric_views = snapshot.get("metric_views", {})
+    metric_html = ""
+    pattern_names = {
+        "vegetable": "Vegetables", "fruit": "Fruit", "seafood": "Fish / Seafood",
+        "fatty_fish": "Fatty Fish", "whole_grain": "Whole Grains",
+        "legume": "Legumes", "nut_seed": "Nuts / Seeds", "plant_variety": "Plant Variety",
+    }
+    for period, title in (("current_week", "Current Week"), ("last_week", "Last Week"),
+                          ("rolling_30", "Rolling 30 Days")):
+        view = metric_views.get(period)
+        if not view:
+            continue
+        current = view["current"]
+        definitions = {definition["key"]: definition for definition in view["definitions"]}
+        prominent = "".join(
+            f'<article class="card"><small>{html.escape(definitions[key]["name"])}</small>'
+            f'<strong>{html.escape(_display(current["nutrients"][key]["value"], " " + definitions[key]["unit"]))}</strong>'
+            f'<span>{html.escape(current["nutrients"][key]["status_label"])} · '
+            f'{html.escape(str(current["nutrients"][key]["coverage_pct"]))}% occurrence coverage</span></article>'
+            for key in prominent_keys(view["definitions"])
+        )
+        nutrient_rows = "".join(
+            "<tr>" + f'<td>{html.escape(definition["name"])}</td>'
+            f'<td>{html.escape(_display(current["nutrients"][key]["value"], " " + definition["unit"]))}</td>'
+            f'<td>{html.escape(current["nutrients"][key]["status_label"])}</td>'
+            f'<td>{html.escape(current["nutrients"][key]["quality"])}</td>'
+            f'<td>{html.escape(_display(current["nutrients"][key].get("previous_comparable_value")))}</td>'
+            f'<td>{html.escape(_display(current["nutrients"][key].get("coverage_pct"), "%"))}</td>'
+            f'<td>{current["nutrients"][key].get("source_occurrences") if current["nutrients"][key].get("source_occurrences") is not None else "—"} / '
+            f'{current["nutrients"][key].get("estimated_occurrences") if current["nutrients"][key].get("estimated_occurrences") is not None else "—"}</td>'
+            f'<td>{html.escape(current["nutrients"][key].get("unavailable_reason") or "")}</td></tr>'
+            for key, definition in definitions.items()
+        )
+        pattern_rows = "".join(
+            "<tr>" + f'<td>{html.escape(label)}</td>'
+            f'<td>{html.escape(_display(current["food_patterns"][key].get("verified_quantity"), " " + str(current["food_patterns"][key].get("verified_unit") or "")))}</td>'
+            f'<td>{current["food_patterns"][key].get("meaningful_occurrences", current["food_patterns"][key].get("distinct_plants", 0))}</td>'
+            f'<td>{current["food_patterns"][key].get("directional_occurrences", 0)}</td>'
+            f'<td>{current["food_patterns"][key].get("unknown_occurrences", "—")}</td>'
+            f'<td>{html.escape(_display(current["food_patterns"][key].get("classification_coverage_pct"), "%"))}</td>'
+            f'<td>{html.escape(current["food_patterns"][key].get("evidence_level", "Unknown"))}</td>'
+            f'<td>{html.escape(current["food_patterns"][key]["quality"])}</td>'
+            f'<td>{html.escape(current["food_patterns"][key]["reference"])}</td></tr>'
+            for key, label in pattern_names.items()
+        )
+        subgroup_summary = ", ".join(
+            f"{name.replace('_', ' ')}: {count}"
+            for name, count in current["food_patterns"]["vegetable"].get("subgroups", {}).items()
+        ) or "None classified"
+        metric_html += (
+            f'<section class="period-view" id="{period}"><h2>{title}</h2>'
+            f'<p>{current["eligible_days"]} eligible of {current["calendar_days"]} calendar days; '
+            f'{len(current["provisional_dates"])} provisional.</p>'
+            f'<div class="grid">{prominent}</div><h2>Nutrients</h2><div class="panel"><table>'
+            '<thead><tr><th>Metric</th><th>Value</th><th>Status</th><th>Quality</th><th>Previous comparable</th><th>Coverage</th><th>Source / estimated entries</th><th>Note</th></tr></thead>'
+            f'<tbody>{nutrient_rows}</tbody></table></div><h2>Food Patterns</h2><div class="panel"><table>'
+            '<thead><tr><th>Pattern</th><th>Verified quantity</th><th>Meaningful occurrences / distinct plants</th><th>Additional directional</th><th>Unknown entries</th><th>Classified</th><th>Evidence</th><th>Quality</th><th>Reference</th></tr></thead>'
+            f'<tbody>{pattern_rows}</tbody></table></div>'
+            f'<p>Vegetable subgroups: {html.escape(subgroup_summary)}</p>'
+            f'<p>Qualifying plants: {html.escape(", ".join(current["food_patterns"]["plant_variety"]["qualifying_foods"]) or "None classified")}</p></section>'
+        )
     averages = snapshot["period_averages"]
     cards = "".join(
         f'<article class="card"><small>{html.escape(label)}</small><strong>{html.escape(_display(averages[key]["usable_per_logged_day"], suffix))}</strong><span>{html.escape(_display(averages[key]["coverage_pct"], "%"))} coverage</span></article>'
@@ -207,6 +295,10 @@ def render_html(snapshot: dict) -> str:
 main{{width:min(100% - clamp(1rem,5vw,4rem),1100px);margin:auto;padding:clamp(1rem,4vw,3rem) 0 4rem}}h1,h2{{text-transform:uppercase;letter-spacing:.04em;margin:.35em 0}}h1{{font-size:clamp(1.65rem,5vw,3rem)}}h2{{font-size:clamp(1rem,2.4vw,1.45rem);margin-top:2rem}}.eyebrow,small{{color:var(--cyan);font-weight:800;text-transform:uppercase;letter-spacing:.07em}}.fresh{{color:var(--muted);display:flex;flex-wrap:wrap;gap:.35rem 1.2rem;margin:1rem 0 1.5rem}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,12rem),1fr));gap:var(--gap)}}.card{{min-width:0;padding:clamp(.8rem,2vw,1.15rem);background:var(--raised);border:1px solid var(--border);border-top:2px solid var(--pink);border-radius:12px;display:flex;flex-direction:column;gap:.4rem}}.card strong{{font-size:clamp(1.35rem,3vw,2rem);color:var(--cyan);overflow-wrap:anywhere}}.card span,td span{{color:var(--muted)}}.panel{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:clamp(.7rem,2vw,1.2rem);overflow-x:auto}}table{{width:100%;border-collapse:collapse;min-width:32rem}}th,td{{padding:.7rem;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}}th{{color:var(--cyan);font-size:.78rem;text-transform:uppercase}}td:first-child{{overflow-wrap:anywhere;max-width:24rem}}li{{margin:.65rem 0;line-height:1.45}}footer{{color:var(--muted);margin-top:2rem;font-size:.85rem}}@media(max-width:520px){{main{{width:min(100% - 1rem,1100px)}}table{{min-width:28rem}}.panel{{padding:.35rem}}}}
 </style></head><body><main><div class="eyebrow">Workout companion · read-only nutrition</div><h1>Nutrition snapshot</h1>
 <div class="fresh"><span>Nutrition data updated: {html.escape(updated)}</span><span>Insights through: {html.escape(snapshot['insights_period']['end'])}</span><span>Last completed day in Lose It: {html.escape(completed)}</span></div>
+<label for="period-selector">Period</label> <select id="period-selector" aria-label="Nutrition period"><option value="current_week">Current Week</option><option value="last_week">Last Week</option><option value="rolling_30">Rolling 30 Days</option></select>
+{metric_html}
+<script>const selector=document.getElementById('period-selector');const views=document.querySelectorAll('.period-view');function showPeriod(){{for(const view of views)view.hidden=view.id!==selector.value;localStorage.setItem('nutritionPeriod',selector.value)}}const saved=localStorage.getItem('nutritionPeriod');if([...selector.options].some(option=>option.value===saved))selector.value=saved;selector.addEventListener('change',showPeriod);showPeriod();</script>
+<h2>Legacy overview · rolling 30 days</h2>
 <section class="grid">{cards}</section><h2>Useful observations</h2><section class="panel"><ul>{insights}</ul></section>
 <h2>Recent days</h2><section class="panel"><table><thead><tr><th>Date</th><th>Calories</th><th>Protein</th><th>Source day state</th></tr></thead><tbody>{daily_rows}</tbody></table></section>
 <h2>Frequent foods</h2><section class="panel"><table><thead><tr><th>Food</th><th>Occurrences</th><th>Calories</th><th>Protein</th></tr></thead><tbody>{food_rows}</tbody></table></section>
@@ -214,6 +306,7 @@ main{{width:min(100% - clamp(1rem,5vw,4rem),1100px);margin:auto;padding:clamp(1r
 
 
 def _encoded(snapshot: dict) -> tuple[bytes, bytes]:
+    _check_snapshot_keys(snapshot)
     json_bytes = (json.dumps(snapshot, ensure_ascii=False, allow_nan=False, indent=2) + "\n").encode()
     html_bytes = render_html(snapshot).encode()
     lowered = (json_bytes + html_bytes).lower()
@@ -285,7 +378,7 @@ def publish_snapshot(
         **targets,
     )
     try:
-        snapshot = build_snapshot(data_dir, report, data_updated_at=data_updated_at)
+        snapshot = build_snapshot(data_dir, report, data_updated_at=data_updated_at, today=today)
         html_bytes, json_bytes = _encoded(snapshot)
         html_path, json_path = _atomic_pair(destination, html_bytes, json_bytes)
         summary = {

@@ -14,6 +14,7 @@ from loseit_mcp.analytics import period_dates, read_analytics
 from loseit_mcp.coverage import read_coverage
 from loseit_mcp.credentials import save_usda_api_key, usda_configuration
 from loseit_mcp.insights import trend_series
+from loseit_mcp.metric_engine import prominent_keys, read_metric_dashboard
 from loseit_mcp.proposals import (
     ProposalError,
     flag_source,
@@ -53,6 +54,8 @@ COLORS = THEME["colors"]
 
 SECTIONS = [
     "Overview",
+    "Nutrients",
+    "Food Patterns",
     "Trends",
     "Meals",
     "Foods",
@@ -84,6 +87,63 @@ PRESETS = {
 
 def number(value, suffix=""):
     return "Unavailable" if value is None else f"{value:,.1f}{suffix}"
+
+
+def nutrient_view(view):
+    current = view["current"]
+    definitions = {definition["key"]: definition for definition in view["definitions"]}
+    st.caption(f"{current['eligible_days']} eligible of {current['calendar_days']} calendar days · "
+               f"{len(current['provisional_dates'])} provisional · {view['timezone']}")
+    pinned = prominent_keys(view["definitions"])
+    columns = st.columns(len(pinned))
+    for column, key in zip(columns, pinned, strict=True):
+        result = current["nutrients"][key]
+        column.metric(definitions[key]["name"], number(result["value"], " " + definitions[key]["unit"]))
+        column.caption(result["status_label"] + " · " +
+                       result["quality"] + " · " +
+                       number(result["coverage_pct"], "%") + " occurrence coverage")
+    st.caption("Protein: 150 g/day central target; 130 g/day On Track floor. Total Sugar is informational and includes naturally occurring sugars.")
+    rows = []
+    for definition in view["definitions"]:
+        key = definition["key"]
+        result = current["nutrients"][key]
+        rows.append({"Metric": definition["name"], "Current": number(result["value"], " " + definition["unit"]),
+                     "Status": result["status_label"],
+                     "Quality": result["quality"],
+                     "Previous comparable": number(result.get("previous_comparable_value")),
+                     "Coverage": number(result.get("coverage_pct"), "%"),
+                     "Estimated occurrences": result.get("estimated_occurrences"),
+                     "Note": result.get("unavailable_reason") or ""})
+    table(rows)
+    st.caption("An eligible day may be provisional when Lose It has not explicitly marked it complete. Unlogged days are never counted as zero.")
+
+
+def food_pattern_view(view):
+    patterns = view["current"]["food_patterns"]
+    names = {"vegetable": "Vegetables", "fruit": "Fruit", "seafood": "Fish / Seafood",
+             "fatty_fish": "Fatty Fish", "whole_grain": "Whole Grains", "legume": "Legumes",
+             "nut_seed": "Nuts / Seeds", "plant_variety": "Plant Variety"}
+    st.caption("Verified quantities and directional evidence are separate. Unknown classification is not zero consumption.")
+    rows = []
+    for key, label in names.items():
+        result = patterns[key]
+        rows.append({"Pattern": label,
+                     "Verified quantity": number(result.get("verified_quantity"), " " + str(result.get("verified_unit") or "")),
+                     "Meaningful occurrences / distinct plants": result.get("meaningful_occurrences", result.get("distinct_plants", 0)),
+                     "Additional directional occurrences": result.get("directional_occurrences", 0),
+                     "Previous comparable": result.get("previous_meaningful_occurrences", result.get("previous_distinct_plants")),
+                     "Unknown occurrences": result.get("unknown_occurrences"),
+                     "Classification coverage": number(result.get("classification_coverage_pct"), "%"),
+                     "Evidence": result.get("evidence_level"),
+                     "Quality": result["quality"],
+                     "Reference": result["reference"]})
+    table(rows)
+    subgroups = patterns["vegetable"].get("subgroups", {})
+    if subgroups:
+        st.caption("Vegetable subgroups: " + ", ".join(
+            f"{name.replace('_', ' ').title()} {count}" for name, count in subgroups.items()))
+    st.caption("Plant variety counts only identifiable, meaningful plant foods; it is an exploratory count, not a clinical score.")
+    st.write("Qualifying plants:", ", ".join(patterns["plant_variety"]["qualifying_foods"]) or "None yet classified")
 
 
 def table(rows):
@@ -433,7 +493,7 @@ def coverage(report, data_dir):
     cards = st.columns(4)
     cards[0].metric("Library foods", library["canonical_foods"])
     cards[1].metric("Formulations", library["formulations"])
-    cards[2].metric("Active anomalies", library["active_anomalies"])
+    cards[2].metric("Historical anomaly findings", library["historical_anomaly_findings"])
     cards[3].metric("Invalid source fields", library["invalid_source_nutrient_fields"])
     table(
         [
@@ -917,7 +977,9 @@ def main():
         st.sidebar.caption("Latest stored diary date: " + connection["latest_diary_date"])
     update_clicked = st.sidebar.button("Update My Nutrition Data", type="primary", width="stretch")
     section = st.sidebar.radio("Navigate", SECTIONS)
-    preset = st.sidebar.selectbox("Date range", list(PRESETS))
+    if section in {"Nutrients", "Food Patterns"}:
+        metric_period = st.sidebar.radio("Nutrition period", ("Current Week", "Last Week", "Rolling 30 Days"), key="nutrition_period")
+    preset = st.sidebar.selectbox("Date range", list(PRESETS)) if section not in {"Nutrients", "Food Patterns"} else "Last 30 days"
     period = PRESETS[preset]
     if preset == "Custom":
         default_start, default_end = period_dates(period="last7")
@@ -950,6 +1012,18 @@ def main():
     if "notice" in st.session_state:
         st.success(st.session_state.pop("notice"))
     st.title(section)
+    if section in {"Nutrients", "Food Patterns"}:
+        try:
+            selected = {"Current Week": "current_week", "Last Week": "last_week",
+                        "Rolling 30 Days": "rolling_30"}[metric_period]
+            view = read_metric_dashboard(args.data_dir, selected)
+            if section == "Nutrients":
+                nutrient_view(view)
+            else:
+                food_pattern_view(view)
+        except Exception:  # noqa: BLE001 - keep sensitive local data out of UI errors
+            st.error("Could not load nutrition metrics. Try updating the local data.")
+        return
     st.caption(f"{start:%b %d, %Y} — {end:%b %d, %Y}")
     try:
         settings = read_settings(args.data_dir)

@@ -807,5 +807,6 @@ def library_status(data_dir: Path) -> dict:
                 (cadence,),
             ).fetchone()
             audits[cadence] = ({"completed_at": row[0], "summary": json.loads(row[1])} if row else None)
+        counts["historical_anomaly_findings"] = counts["active_anomalies"]
         return counts | {"foods_by_nutrient_provenance": provenance,
                          "nutrient_fields_by_confidence": confidence, "last_audits": audits}

@@ -447,6 +447,15 @@ def run_update(
             research_unresolved = result["unresolved"]
             progress("Applying the Resolved Food Library and serving mappings")
             result["resolved_food_library"] = populate_library(data_dir)
+            from .food_patterns import classify_obvious
+            from .metric_engine import read_metric_dashboard
+
+            with NutritionRepository(data_dir) as repo, repo.connection as c:
+                result["food_pattern_classification"] = classify_obvious(c)
+            result["metric_refresh"] = {
+                period: read_metric_dashboard(data_dir, period, today=today)["current"]["eligible_days"]
+                for period in ("current_week", "last_week", "rolling_30")
+            }
             progress("Updating analytics")
             report = read_analytics(data_dir, date(today.year, 1, 1), today, compare=False)
             result["coverage_after"] = report["nutrient_coverage"]

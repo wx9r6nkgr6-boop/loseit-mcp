@@ -13,7 +13,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Self
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 SOURCE = "loseit"
 STANDARD_NUTRIENTS = (
     "calories",
@@ -484,6 +484,98 @@ MIGRATIONS = (
     CREATE TRIGGER anomaly_findings_no_delete BEFORE DELETE ON nutrition_anomaly_findings BEGIN SELECT RAISE(ABORT,'Audit findings are append-only'); END;
     CREATE TRIGGER quality_findings_no_update BEFORE UPDATE ON source_nutrient_quality_findings BEGIN SELECT RAISE(ABORT,'Quality findings are append-only'); END;
     CREATE TRIGGER quality_findings_no_delete BEFORE DELETE ON source_nutrient_quality_findings BEGIN SELECT RAISE(ABORT,'Quality findings are append-only'); END;
+    """,
+    """
+    CREATE TABLE food_pattern_evidence (
+        id INTEGER PRIMARY KEY,
+        canonical_food_id INTEGER NOT NULL REFERENCES canonical_foods(id),
+        formulation_id INTEGER REFERENCES food_formulations(id),
+        pattern_key TEXT NOT NULL,
+        plant_identity TEXT,
+        vegetable_subgroup TEXT,
+        presence_class TEXT NOT NULL CHECK(presence_class IN
+            ('meaningful','substantial','trace','presence_known_quantity_unknown','none_verified')),
+        quantity_kind TEXT NOT NULL CHECK(quantity_kind IN
+            ('exact_equivalent','estimated_interval','unquantified')),
+        equivalent_value REAL CHECK(equivalent_value IS NULL OR equivalent_value >= 0),
+        equivalent_unit TEXT,
+        lower_bound REAL,
+        upper_bound REAL,
+        provenance TEXT NOT NULL,
+        confidence TEXT NOT NULL CHECK(confidence IN ('very_high','high','medium','low')),
+        evidence_basis TEXT NOT NULL,
+        evidence_url TEXT,
+        valid_from TEXT,
+        valid_to TEXT,
+        user_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(user_confirmed IN (0,1)),
+        supersedes_id INTEGER REFERENCES food_pattern_evidence(id),
+        content_sha256 TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        CHECK(quantity_kind != 'exact_equivalent' OR
+            (equivalent_value IS NOT NULL AND equivalent_unit IS NOT NULL)),
+        CHECK(quantity_kind != 'estimated_interval' OR
+            (lower_bound IS NOT NULL AND upper_bound IS NOT NULL AND lower_bound <= upper_bound)),
+        CHECK(formulation_id IS NOT NULL OR provenance = 'user_confirmed')
+    );
+    CREATE INDEX idx_pattern_food ON food_pattern_evidence(canonical_food_id,pattern_key,id);
+    CREATE TABLE added_sugar_evidence (
+        id INTEGER PRIMARY KEY,
+        canonical_food_id INTEGER NOT NULL REFERENCES canonical_foods(id),
+        formulation_id INTEGER NOT NULL REFERENCES food_formulations(id),
+        value_g REAL NOT NULL CHECK(value_g >= 0),
+        basis_amount REAL NOT NULL CHECK(basis_amount > 0),
+        basis_unit TEXT NOT NULL,
+        provenance TEXT NOT NULL,
+        confidence TEXT NOT NULL CHECK(confidence IN ('very_high','high','medium','low')),
+        evidence_basis TEXT NOT NULL,
+        evidence_url TEXT,
+        valid_from TEXT,
+        valid_to TEXT,
+        user_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(user_confirmed IN (0,1)),
+        supersedes_id INTEGER REFERENCES added_sugar_evidence(id),
+        content_sha256 TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_added_sugar_food ON added_sugar_evidence(canonical_food_id,formulation_id,id);
+    CREATE TABLE added_sugar_pilot_runs (
+        id INTEGER PRIMARY KEY,
+        scope_start TEXT NOT NULL,
+        scope_end TEXT NOT NULL,
+        summary_json TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE daily_allowance_observations (
+        id INTEGER PRIMARY KEY,
+        source_date TEXT NOT NULL,
+        final_daily_allowance REAL NOT NULL CHECK(final_daily_allowance > 0),
+        base_goal REAL,
+        activity_adjustment REAL,
+        provenance TEXT NOT NULL,
+        source_reference TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL UNIQUE
+    );
+    CREATE INDEX idx_allowance_date ON daily_allowance_observations(source_date,id);
+    CREATE TABLE food_pattern_audit_runs (
+        id INTEGER PRIMARY KEY,
+        scope_start TEXT NOT NULL,
+        scope_end TEXT NOT NULL,
+        status TEXT NOT NULL,
+        summary_json TEXT NOT NULL,
+        run_fingerprint TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER food_pattern_evidence_no_update BEFORE UPDATE ON food_pattern_evidence BEGIN SELECT RAISE(ABORT,'Pattern evidence is append-only'); END;
+    CREATE TRIGGER food_pattern_evidence_no_delete BEFORE DELETE ON food_pattern_evidence BEGIN SELECT RAISE(ABORT,'Pattern evidence is append-only'); END;
+    CREATE TRIGGER added_sugar_evidence_no_update BEFORE UPDATE ON added_sugar_evidence BEGIN SELECT RAISE(ABORT,'Added sugar evidence is append-only'); END;
+    CREATE TRIGGER added_sugar_evidence_no_delete BEFORE DELETE ON added_sugar_evidence BEGIN SELECT RAISE(ABORT,'Added sugar evidence is append-only'); END;
+    CREATE TRIGGER added_sugar_pilot_no_update BEFORE UPDATE ON added_sugar_pilot_runs BEGIN SELECT RAISE(ABORT,'Pilot history is append-only'); END;
+    CREATE TRIGGER added_sugar_pilot_no_delete BEFORE DELETE ON added_sugar_pilot_runs BEGIN SELECT RAISE(ABORT,'Pilot history is append-only'); END;
+    CREATE TRIGGER daily_allowance_no_update BEFORE UPDATE ON daily_allowance_observations BEGIN SELECT RAISE(ABORT,'Allowance observations are append-only'); END;
+    CREATE TRIGGER daily_allowance_no_delete BEFORE DELETE ON daily_allowance_observations BEGIN SELECT RAISE(ABORT,'Allowance observations are append-only'); END;
+    CREATE TRIGGER food_pattern_audit_no_update BEFORE UPDATE ON food_pattern_audit_runs BEGIN SELECT RAISE(ABORT,'Pattern audits are append-only'); END;
+    CREATE TRIGGER food_pattern_audit_no_delete BEFORE DELETE ON food_pattern_audit_runs BEGIN SELECT RAISE(ABORT,'Pattern audits are append-only'); END;
     """,
 )
 

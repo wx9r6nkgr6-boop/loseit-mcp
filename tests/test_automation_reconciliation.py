@@ -45,6 +45,11 @@ def test_schema_six_upgrade_preserves_existing_occurrences(tmp_path):
     seed(tmp_path, [complete_item()])
     with sqlite3.connect(tmp_path / "nutrition.sqlite3") as connection:
         for table in (
+            "food_pattern_evidence",
+            "added_sugar_evidence",
+            "added_sugar_pilot_runs",
+            "daily_allowance_observations",
+            "food_pattern_audit_runs",
             "source_nutrient_quality_findings",
             "nutrition_anomaly_findings",
             "nutrition_audit_runs",
@@ -63,7 +68,7 @@ def test_schema_six_upgrade_preserves_existing_occurrences(tmp_path):
             connection.execute(f"DROP TABLE {table}")
         connection.execute("DELETE FROM schema_version WHERE version>=7")
     with NutritionRepository(tmp_path) as repo:
-        assert repo.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
+        assert repo.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
         assert repo.connection.execute("SELECT COUNT(*) FROM food_occurrences").fetchone()[0] == 1
         assert repo.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE name='automation_events'"
@@ -224,6 +229,10 @@ def test_static_export_is_sanitized_responsive_atomic_and_preserves_good_version
     json_text = (destination / "nutrition_snapshot.json").read_text()
     snapshot = json.loads(json_text)
     assert snapshot["schema_version"] == 1 and snapshot["read_only"] is True
+    assert set(snapshot["metric_views"]) == {"current_week", "last_week", "rolling_30"}
+    assert snapshot["metric_views"]["current_week"]["definitions"][2]["name"] == "Total Sugar"
+    assert snapshot["metric_views"]["current_week"]["current"]["nutrients"]["added_sugar_g"]["value"] is None
+    assert "Food Patterns" in html_text and 'id="period-selector"' in html_text
     assert "@media(max-width:520px)" in html_text and "repeat(auto-fit,minmax" in html_text
     lowered = (html_text + json_text).lower()
     assert all(marker not in lowered for marker in ("liauth", "api_key", "raw_diary_snapshots"))
@@ -237,7 +246,6 @@ def test_static_export_is_sanitized_responsive_atomic_and_preserves_good_version
     assert scheduled_failure["status"] == "failed"
     assert (destination / "nutrition_dashboard.html").read_text() == prior_html
     assert (destination / "nutrition_snapshot.json").read_text() == prior_json
-
     def fail(_snapshot):
         raise RuntimeError("fixture export failure")
 
@@ -246,6 +254,13 @@ def test_static_export_is_sanitized_responsive_atomic_and_preserves_good_version
     assert failed["status"] == "failed"
     assert (destination / "nutrition_dashboard.html").read_text() == prior_html
     assert (destination / "nutrition_snapshot.json").read_text() == prior_json
+
+
+def test_static_export_rejects_sensitive_nested_fields():
+    from loseit_mcp.publication import _encoded
+
+    with pytest.raises(ValueError, match="sensitive field"):
+        _encoded({"metric_views": {"current_week": {"cookie": "private"}}})
 
 
 def test_dashboard_css_has_fluid_multi_width_rules():
