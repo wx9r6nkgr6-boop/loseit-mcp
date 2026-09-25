@@ -15,6 +15,7 @@ from uuid import uuid4
 from .analytics import period_dates, read_analytics
 from .proposals import read_settings, reader
 from .repository import NutritionRepository, _now
+from .resolved import library_status
 
 SNAPSHOT_SCHEMA_VERSION = 1
 HTML_NAME = "nutrition_dashboard.html"
@@ -118,6 +119,7 @@ def build_snapshot(
                 "protein_g": food["metrics"]["protein_g"][2],
             }
         )
+    library = library_status(data_dir)
     return {
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "read_only": True,
@@ -149,6 +151,14 @@ def build_snapshot(
             "filled_occurrences": report["data_quality"][
                 "filled_by_scaled_enrichment_occurrences"
             ],
+            "resolved_library_foods": library["canonical_foods"],
+            "formulations": library["formulations"],
+            "active_anomalies": library["active_anomalies"],
+            "invalid_source_nutrient_fields": library["invalid_source_nutrient_fields"],
+            "last_audits": {
+                name: detail["completed_at"] if detail else None
+                for name, detail in library["last_audits"].items()
+            },
         },
     }
 

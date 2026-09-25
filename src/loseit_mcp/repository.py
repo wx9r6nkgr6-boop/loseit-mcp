@@ -13,7 +13,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Self
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 SOURCE = "loseit"
 STANDARD_NUTRIENTS = (
     "calories",
@@ -365,6 +365,125 @@ MIGRATIONS = (
     CREATE TRIGGER publication_no_delete BEFORE DELETE ON publication_events BEGIN SELECT RAISE(ABORT,'Publication history is append-only'); END;
     CREATE TRIGGER human_answers_no_update BEFORE UPDATE ON human_review_answers BEGIN SELECT RAISE(ABORT,'Human answers are append-only'); END;
     CREATE TRIGGER human_answers_no_delete BEFORE DELETE ON human_review_answers BEGIN SELECT RAISE(ABORT,'Human answers are append-only'); END;
+    """,
+    """
+    CREATE TABLE canonical_foods (
+        id INTEGER PRIMARY KEY,
+        canonical_name TEXT NOT NULL,
+        canonical_brand TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE food_source_identities (
+        id INTEGER PRIMARY KEY,
+        canonical_food_id INTEGER NOT NULL REFERENCES canonical_foods(id),
+        source TEXT NOT NULL,
+        source_food_id TEXT NOT NULL,
+        evidence_class TEXT NOT NULL,
+        confidence TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        UNIQUE(source,source_food_id)
+    );
+    CREATE INDEX idx_food_source_canonical ON food_source_identities(canonical_food_id);
+    CREATE TABLE food_formulations (
+        id INTEGER PRIMARY KEY,
+        canonical_food_id INTEGER NOT NULL REFERENCES canonical_foods(id),
+        version INTEGER NOT NULL,
+        formulation_name TEXT NOT NULL,
+        historical INTEGER NOT NULL DEFAULT 0 CHECK(historical IN (0,1)),
+        valid_from TEXT,
+        valid_to TEXT,
+        source_reference TEXT NOT NULL,
+        reference_url TEXT,
+        assumptions TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(canonical_food_id,version)
+    );
+    CREATE TABLE formulation_servings (
+        id INTEGER PRIMARY KEY,
+        formulation_id INTEGER NOT NULL REFERENCES food_formulations(id),
+        canonical_amount REAL NOT NULL CHECK(canonical_amount>0),
+        canonical_unit TEXT NOT NULL,
+        gram_weight REAL CHECK(gram_weight IS NULL OR gram_weight>0),
+        logged_unit TEXT NOT NULL,
+        actual_units_per_logged_unit REAL NOT NULL DEFAULT 1 CHECK(actual_units_per_logged_unit>0),
+        mapping_type TEXT NOT NULL,
+        confidence TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(formulation_id,logged_unit)
+    );
+    CREATE TABLE formulation_nutrients (
+        id INTEGER PRIMARY KEY,
+        formulation_id INTEGER NOT NULL REFERENCES food_formulations(id),
+        nutrient TEXT NOT NULL,
+        value REAL NOT NULL CHECK(value>=0),
+        unit TEXT NOT NULL,
+        provenance TEXT NOT NULL,
+        confidence TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(formulation_id,nutrient)
+    );
+    CREATE TABLE occurrence_resolution_history (
+        id INTEGER PRIMARY KEY,
+        occurrence_id INTEGER NOT NULL REFERENCES food_occurrences(id),
+        formulation_id INTEGER NOT NULL REFERENCES food_formulations(id),
+        scale_factor REAL NOT NULL CHECK(scale_factor>=0),
+        mapping_method TEXT NOT NULL,
+        confidence TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_occurrence_resolution ON occurrence_resolution_history(occurrence_id,id);
+    CREATE TABLE nutrition_audit_runs (
+        id INTEGER PRIMARY KEY,
+        cadence TEXT NOT NULL CHECK(cadence IN ('daily','weekly','monthly','full_history')),
+        scope_start TEXT,
+        scope_end TEXT,
+        status TEXT NOT NULL,
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        started_at TEXT NOT NULL,
+        completed_at TEXT
+    );
+    CREATE INDEX idx_nutrition_audits ON nutrition_audit_runs(cadence,id);
+    CREATE TABLE nutrition_anomaly_findings (
+        id INTEGER PRIMARY KEY,
+        audit_run_id INTEGER NOT NULL REFERENCES nutrition_audit_runs(id),
+        occurrence_id INTEGER NOT NULL REFERENCES food_occurrences(id),
+        code TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        details_json TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_anomaly_occurrence ON nutrition_anomaly_findings(occurrence_id,id);
+    CREATE TABLE source_nutrient_quality_findings (
+        id INTEGER PRIMARY KEY,
+        audit_run_id INTEGER NOT NULL REFERENCES nutrition_audit_runs(id),
+        occurrence_id INTEGER NOT NULL REFERENCES food_occurrences(id),
+        nutrient TEXT NOT NULL,
+        source_value REAL NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('suspect','invalid')),
+        reason TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_source_quality_occurrence ON source_nutrient_quality_findings(occurrence_id,nutrient,id);
+    CREATE TRIGGER canonical_foods_no_delete BEFORE DELETE ON canonical_foods BEGIN SELECT RAISE(ABORT,'Resolved foods retain history'); END;
+    CREATE TRIGGER source_identities_no_delete BEFORE DELETE ON food_source_identities BEGIN SELECT RAISE(ABORT,'Source identities retain history'); END;
+    CREATE TRIGGER formulations_no_update BEFORE UPDATE ON food_formulations BEGIN SELECT RAISE(ABORT,'Formulations are append-only'); END;
+    CREATE TRIGGER formulations_no_delete BEFORE DELETE ON food_formulations BEGIN SELECT RAISE(ABORT,'Formulations are append-only'); END;
+    CREATE TRIGGER formulation_nutrients_no_update BEFORE UPDATE ON formulation_nutrients BEGIN SELECT RAISE(ABORT,'Resolved nutrients are append-only'); END;
+    CREATE TRIGGER formulation_nutrients_no_delete BEFORE DELETE ON formulation_nutrients BEGIN SELECT RAISE(ABORT,'Resolved nutrients are append-only'); END;
+    CREATE TRIGGER formulation_servings_no_update BEFORE UPDATE ON formulation_servings BEGIN SELECT RAISE(ABORT,'Serving mappings are append-only'); END;
+    CREATE TRIGGER formulation_servings_no_delete BEFORE DELETE ON formulation_servings BEGIN SELECT RAISE(ABORT,'Serving mappings are append-only'); END;
+    CREATE TRIGGER occurrence_resolutions_no_update BEFORE UPDATE ON occurrence_resolution_history BEGIN SELECT RAISE(ABORT,'Resolution history is append-only'); END;
+    CREATE TRIGGER occurrence_resolutions_no_delete BEFORE DELETE ON occurrence_resolution_history BEGIN SELECT RAISE(ABORT,'Resolution history is append-only'); END;
+    CREATE TRIGGER anomaly_findings_no_update BEFORE UPDATE ON nutrition_anomaly_findings BEGIN SELECT RAISE(ABORT,'Audit findings are append-only'); END;
+    CREATE TRIGGER anomaly_findings_no_delete BEFORE DELETE ON nutrition_anomaly_findings BEGIN SELECT RAISE(ABORT,'Audit findings are append-only'); END;
+    CREATE TRIGGER quality_findings_no_update BEFORE UPDATE ON source_nutrient_quality_findings BEGIN SELECT RAISE(ABORT,'Quality findings are append-only'); END;
+    CREATE TRIGGER quality_findings_no_delete BEFORE DELETE ON source_nutrient_quality_findings BEGIN SELECT RAISE(ABORT,'Quality findings are append-only'); END;
     """,
 )
 

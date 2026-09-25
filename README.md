@@ -229,6 +229,24 @@ Core tables:
 Source observations and estimates live in different tables. Importing an
 estimate cannot overwrite raw JSON or a Lose It! nutrient observation.
 
+### Resolved Food Library and integrity audits
+
+The durable Resolved Food Library maps stable Lose It source IDs to canonical
+foods and append-only formulations. Each formulation has explicit serving
+mappings and nutrient-level provenance/confidence. Known foods reuse those
+profiles for arbitrary quantities; gram conversion is used only when a stored
+authoritative gram weight exists. A quantity change alone does not create a new
+formulation, while a materially changed per-serving fingerprint is audited.
+
+Normal updates also run a bounded daily plausibility audit, with weekly and
+monthly gates recorded in `nutrition_audit_runs`. Audits preserve raw/source
+values and append findings. A source nutrient can be marked invalid for the
+combined analytics layer without being deleted or rewritten; the combined
+layer then uses an explicitly provenanced formulation value. Provider failure
+does not itself create a human question: representative or calorie-constrained
+fallbacks are used when defensible, and only factual ambiguities that a person
+can materially clarify remain in **Needs Your Help**.
+
 ## Enrichment workflow
 
 Before researching foods, inspect the nutrition already present locally:

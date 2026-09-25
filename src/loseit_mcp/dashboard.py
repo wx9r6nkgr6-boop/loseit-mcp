@@ -38,6 +38,7 @@ from loseit_mcp.reconnect import (
     reconnect_with_token,
 )
 from loseit_mcp.research_queue import read_research_queue
+from loseit_mcp.resolved import library_status
 from loseit_mcp.review_inbox import answer_question, needs_help, recent_answers
 from loseit_mcp.scheduler import disable as disable_schedule
 from loseit_mcp.scheduler import enable as enable_schedule
@@ -427,6 +428,22 @@ def weights(report):
 
 
 def coverage(report, data_dir):
+    library = library_status(data_dir)
+    st.subheader("Resolved Food Library")
+    cards = st.columns(4)
+    cards[0].metric("Library foods", library["canonical_foods"])
+    cards[1].metric("Formulations", library["formulations"])
+    cards[2].metric("Active anomalies", library["active_anomalies"])
+    cards[3].metric("Invalid source fields", library["invalid_source_nutrient_fields"])
+    table(
+        [
+            {
+                "Audit": name.replace("_", " ").title(),
+                "Last completed": detail["completed_at"] if detail else "Not yet run",
+            }
+            for name, detail in library["last_audits"].items()
+        ]
+    )
     st.info(
         "Unresolved reference cache does not mean incomplete nutrition. The standard research queue includes only genuine standard-nutrient gaps."
     )

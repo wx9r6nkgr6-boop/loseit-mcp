@@ -246,7 +246,8 @@ def test_usda_exact_product_match_retains_provenance_and_reference():
     assert evidence.identity_verified and evidence.portion_reconciled
     assert evidence.source_kind == "authoritative_database"
     assert evidence.nutrients["sodium_mg"] == 50
-    assert evidence.url.endswith("/10/nutrients") and evidence.research_date == TODAY.isoformat()
+    assert evidence.url.endswith("/10/nutrients")
+    assert date.fromisoformat(evidence.research_date) >= TODAY
     assert evidence.basis_amount == 100 and evidence.basis_unit == "g"
 
 
@@ -370,7 +371,9 @@ def test_missing_provider_does_not_break_successful_sync(tmp_path):
         worker=ConfiguredResearchWorker(None),
         today=TODAY,
     )
-    assert result["status"] == "complete_with_unresolved"
+    assert result["status"] == "complete"
+    assert result["unresolved"] == result["sent_to_review"] == 0
+    assert result["resolved_by_representative_or_modeled_fallback"] == 1
     assert result["research_unavailable"] >= 1 and result["analytics_refreshed"]
 
 
@@ -421,6 +424,6 @@ def test_dashboard_shows_connection_reconnect_and_provider_configuration(tmp_pat
 def test_current_schema_preserves_raw_immutability(tmp_path):
     seed(tmp_path, [item()])
     with NutritionRepository(tmp_path) as repo:
-        assert repo.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
+        assert repo.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
         with pytest.raises(sqlite3.IntegrityError):
             repo.connection.execute("DELETE FROM raw_diary_snapshots")

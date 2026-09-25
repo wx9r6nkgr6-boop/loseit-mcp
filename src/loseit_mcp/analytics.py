@@ -99,6 +99,10 @@ def _prepare(c):
         context = group["context"]
         for row in group["rows"]:
             row["estimates"] = {}
+            row["nutrient_provenance"] = {
+                nutrient: {"provenance": "source", "confidence": "high"}
+                for nutrient in row["source_nutrients"]
+            }
             row["quality_flags"] = []
             n = row["source_nutrients"]
             if any(v < 0 for v in n.values()):
@@ -166,6 +170,22 @@ def _prepare(c):
                             row["estimates"][estimate["nutrient"]] = (
                                 estimate["estimated_value"] * factor
                             )
+            if _table(c, "food_source_identities"):
+                from .resolved import combined_values_for_occurrence
+
+                combined = combined_values_for_occurrence(c, row)
+                for nutrient, resolved in combined.items():
+                    row["nutrient_provenance"][nutrient] = {
+                        "provenance": resolved["provenance"],
+                        "confidence": resolved["confidence"],
+                    }
+                    if resolved["provenance"] != "source":
+                        if nutrient in row["source_nutrients"]:
+                            row["quality_flags"].append(
+                                f"invalid_source_{nutrient}_superseded"
+                            )
+                            row["source_nutrients"].pop(nutrient, None)
+                        row["estimates"][nutrient] = resolved["value"]
             records.append(row)
     if _table(c, "source_review_flags"):
         flags = {r["source_food_id"]:r["status"] for r in c.execute("SELECT * FROM source_review_flags ORDER BY id")}
@@ -633,9 +653,11 @@ def _report(
             }
             for label, dates in buckets.items()
         ]
-    calories = [r["source_nutrients"].get("calories") for r in rows]
+    calories = [
+        r["source_nutrients"].get("calories", r["estimates"].get("calories")) for r in rows
+    ]
     complete_macro_calories = sum(
-        r["source_nutrients"].get("calories", 0)
+        r["source_nutrients"].get("calories", r["estimates"].get("calories", 0))
         for r in rows
         if all(
             n in r["source_nutrients"] or n in r["estimates"]
@@ -654,6 +676,25 @@ def _report(
         or (not f["source_food_id"] and (f["food_name"], f["brand"]) in selected_names)
     ]
     food_report = _foods(rows, grouping)
+    evidence_quality = {}
+    for nutrient in NUTRIENTS:
+        provenance = Counter()
+        confidence = Counter()
+        unresolved = 0
+        for row in rows:
+            if nutrient in row["source_nutrients"] or nutrient in row["estimates"]:
+                detail = row["nutrient_provenance"].get(
+                    nutrient, {"provenance": "legacy_enrichment", "confidence": "high"}
+                )
+                provenance[detail["provenance"]] += 1
+                confidence[detail["confidence"]] += 1
+            else:
+                unresolved += 1
+        evidence_quality[nutrient] = {
+            "by_provenance": dict(sorted(provenance.items())),
+            "by_confidence": dict(sorted(confidence.items())),
+            "unresolved": unresolved,
+        }
     report = {
         "schema_version": 1,
         "local_only": True,
@@ -677,6 +718,7 @@ def _report(
             }
             for n, m in summary["nutrients"].items()
         },
+        "evidence_quality_coverage": evidence_quality,
         "weight_summary": _weight(weights, start, end),
         "meal_summary": _meals(rows),
         "food_contributors": food_report,
@@ -706,12 +748,12 @@ def _report(
             "no_stable_source_id_occurrences": sum(not r["source_food_id"] for r in rows),
         },
         "definitions": {
-            "daily_arrays": "Partial known sums; null means no numeric values. Source wins; estimates only fill source gaps. Missing count explicitly accompanies totals.",
+            "daily_arrays": "Partial known sums; null means no numeric values. Valid source wins; resolved values fill gaps or supersede source fields explicitly marked invalid. Missing count accompanies totals.",
             "averages": "Logged-day mean requires full numeric coverage on logged days. Calendar-day intake mean additionally requires every day logged. Recorded contribution/calendar day is not estimated intake on unlogged days.",
             "enrichment": "Numeric use requires reviewed high-confidence reference AND explicit nutrition_basis.occurrence_scaling={method:logged_amount,unit:<exact stored unit>}. Bounds/unscaled references remain research-availability only.",
             "weights": "No interpolation. Rolling observed-day averages require 3 observations/7 calendar days or 7/30, same known unit; may include days before selection.",
             "meals": "Original classification; average per distinct logged date/meal, not per food. Shares null when period nutrient total incomplete.",
-            "quality": "Heuristic review flags only, no automatic correction or dietary advice. Research queue remains authoritative for research availability.",
+            "quality": "Raw/source values remain immutable. Audit findings may mark a source field invalid for combined analytics, which can then use an explicitly provenanced resolved value.",
         },
     }
     if compare:

@@ -150,14 +150,23 @@ def latest_research_issues(data_dir):
     with reader(data_dir) as c:
         if not c.execute("SELECT 1 FROM sqlite_master WHERE name='research_attempts'").fetchone():
             return []
+        library_filter = (
+            "AND NOT EXISTS (SELECT 1 FROM food_source_identities i "
+            "WHERE i.source='loseit' AND i.source_food_id=a.source_food_id)"
+            if c.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='food_source_identities'"
+            ).fetchone()
+            else ""
+        )
         rows = c.execute(
             """SELECT a.source_food_id,a.provider,a.status,a.summary_json,a.created_at
                FROM research_attempts a
                JOIN (SELECT source_food_id,MAX(id) id FROM research_attempts GROUP BY source_food_id) x
                  ON x.id=a.id
                WHERE a.status IN ('no_exact_match','ambiguous_match','conflicting_evidence',
-                                  'serving_mismatch','branded_generic_blocked')
-               ORDER BY a.id DESC"""
+                                  'serving_mismatch','branded_generic_blocked') """
+            + library_filter
+            + " ORDER BY a.id DESC"
         ).fetchall()
     return [
         {
@@ -427,26 +436,39 @@ def run_update(
                 result["error"] = "Lose It connection expired. Reconnect to continue this update."
                 _event(data_dir, run, "reconnect_required", {"status": "reconnect_required"})
                 return result
+            progress("Auditing source nutrition plausibility and serving fingerprints")
+            from .resolved import library_status, populate_library, run_due_audits
+
+            result["audits"] = run_due_audits(data_dir, today=today)
             progress("Checking nutrition coverage")
             result.update(
                 process_research(data_dir, worker=worker, run_id=run, progress=progress)
             )
+            research_unresolved = result["unresolved"]
+            progress("Applying the Resolved Food Library and serving mappings")
+            result["resolved_food_library"] = populate_library(data_dir)
             progress("Updating analytics")
             report = read_analytics(data_dir, date(today.year, 1, 1), today, compare=False)
             result["coverage_after"] = report["nutrient_coverage"]
             result["remaining_research_queue"] = report["data_quality"][
                 "research_queue_count_global"
             ]
+            result["resolved_by_representative_or_modeled_fallback"] = max(
+                0, research_unresolved - result["remaining_research_queue"]
+            )
+            result["unresolved"] = result["remaining_research_queue"]
+            from .review_inbox import needs_help
+
+            result["sent_to_review"] = len(needs_help(data_dir))
+            result["library_status"] = library_status(data_dir)
             proposals = list_proposals(data_dir)
             review_ids = {
                 p["document"]["target"]["source_food_id"]
                 for p in proposals
                 if p["status"] in {"needs_review", "ready", "partially_approved"}
             }
-            review_ids |= {
-                f["source_food_id"] for f in report["data_quality"]["foods"] if f["review_flags"]
-            }
             review_ids |= {row["source_food_id"] for row in latest_research_issues(data_dir)}
+            review_ids |= {row["source_food_id"] for row in needs_help(data_dir)}
             result["needs_review"] = len(review_ids)
             result["analytics_refreshed"] = True
             result["recent_dates_rechecked"] = 8

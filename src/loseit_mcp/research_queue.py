@@ -265,6 +265,10 @@ def _queue(c: sqlite3.Connection) -> dict[str, Any]:
             source_missing |= gaps
             link = links.get(row["id"])
             usable = set()
+            if _table(c, "food_source_identities"):
+                from .resolved import library_values_for_occurrence
+
+                usable |= set(library_values_for_occurrence(c, row))
             if link:
                 past = review_contexts.get(link["id"], [])
                 changed = bool(past) and _conflicts(past + context)
@@ -305,7 +309,7 @@ def _queue(c: sqlite3.Connection) -> dict[str, Any]:
                             _finite(item["estimated_value"]) or bounds
                         ):
                             usable.add(item["nutrient"])
-                filled |= gaps & usable
+            filled |= gaps & usable
             missing_counts.update(gaps - usable)
         missing = [n for n in STANDARD_NUTRIENTS if missing_counts[n]]
         status = (

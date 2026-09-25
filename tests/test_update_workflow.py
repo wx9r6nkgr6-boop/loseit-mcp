@@ -169,7 +169,9 @@ def test_missing_invalid_research_response(tmp_path, response):
 
     result = run_update(tmp_path, service_factory=factory(), worker=InvalidWorker(), today=TODAY)
     assert result["automatically_enriched"] == 0
-    assert result["unresolved"] == 1 and result["analytics_refreshed"]
+    assert result["unresolved"] == 0 and result["analytics_refreshed"]
+    assert result["resolved_by_representative_or_modeled_fallback"] == 1
+    assert result["sent_to_review"] == 0
     assert not list_proposals(tmp_path)
 
 
@@ -184,7 +186,9 @@ def test_worker_failure_isolated_and_recoverable(tmp_path):
     assert result["failures"] == 1 and result["analytics_refreshed"]
     assert "private external response" not in json.dumps(result)
     retry = run_update(tmp_path, service_factory=factory(), worker=Worker(), today=TODAY)
-    assert retry["automatically_enriched"] == 1
+    assert retry["automatically_enriched"] == 0
+    assert retry["remaining_research_queue"] == 0
+    assert retry["library_status"]["source_identities"] == 1
 
 
 def test_partial_worker_failure_does_not_block_other_food(tmp_path):

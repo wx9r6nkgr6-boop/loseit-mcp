@@ -45,6 +45,15 @@ def test_schema_six_upgrade_preserves_existing_occurrences(tmp_path):
     seed(tmp_path, [complete_item()])
     with sqlite3.connect(tmp_path / "nutrition.sqlite3") as connection:
         for table in (
+            "source_nutrient_quality_findings",
+            "nutrition_anomaly_findings",
+            "nutrition_audit_runs",
+            "occurrence_resolution_history",
+            "formulation_nutrients",
+            "formulation_servings",
+            "food_formulations",
+            "food_source_identities",
+            "canonical_foods",
             "human_review_answers",
             "publication_events",
             "publication_settings_versions",
@@ -52,9 +61,9 @@ def test_schema_six_upgrade_preserves_existing_occurrences(tmp_path):
             "day_completion_observations",
         ):
             connection.execute(f"DROP TABLE {table}")
-        connection.execute("DELETE FROM schema_version WHERE version=7")
+        connection.execute("DELETE FROM schema_version WHERE version>=7")
     with NutritionRepository(tmp_path) as repo:
-        assert repo.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
+        assert repo.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
         assert repo.connection.execute("SELECT COUNT(*) FROM food_occurrences").fetchone()[0] == 1
         assert repo.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE name='automation_events'"
