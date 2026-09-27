@@ -1,6 +1,7 @@
 """Streamlit presentation: nutrition, insights and review rules stay in reusable services."""
 
 import argparse
+import html
 import inspect
 import json
 import os
@@ -13,8 +14,15 @@ import streamlit as st
 from loseit_mcp.analytics import period_dates, read_analytics
 from loseit_mcp.coverage import read_coverage
 from loseit_mcp.credentials import save_usda_api_key, usda_configuration
+from loseit_mcp.home_cards import (
+    attention_keys,
+    card_model,
+    change_preference,
+    load_preferences,
+    save_preferences,
+)
 from loseit_mcp.insights import trend_series
-from loseit_mcp.metric_engine import prominent_keys, read_metric_dashboard
+from loseit_mcp.metric_engine import read_metric_dashboard
 from loseit_mcp.proposals import (
     ProposalError,
     flag_source,
@@ -89,20 +97,74 @@ def number(value, suffix=""):
     return "Unavailable" if value is None else f"{value:,.1f}{suffix}"
 
 
-def nutrient_view(view):
+def _metric_card(definition, result):
+    card = card_model(definition, result)
+    st.metric(card["name"], card["value_text"])
+    if card["progress_kind"] == "adequacy":
+        st.progress(card["progress_fraction"])
+    elif card["progress_kind"] in {"limit", "limit_over", "range"}:
+        color = "#ff7185" if card["progress_kind"] == "limit_over" else "#e7ae58"
+        width = 100 * card["progress_fraction"]
+        st.markdown(
+            f'<div role="img" aria-label="{html.escape(card["progress_text"] or "")}" '
+            'style="background:#343442;border-radius:99px;height:9px;overflow:hidden">'
+            f'<div style="background:{color};width:{width:.1f}%;height:100%"></div></div>',
+            unsafe_allow_html=True,
+        )
+    if card["progress_text"]:
+        st.caption(card["progress_text"])
+    if card["goal_text"]:
+        st.caption(card["goal_text"])
+    st.caption(card["status"] + " · " + card["quality"])
+    if card["previous_text"]:
+        st.caption(card["previous_text"])
+
+
+def nutrient_view(view, data_dir):
     current = view["current"]
     definitions = {definition["key"]: definition for definition in view["definitions"]}
+    preferences = load_preferences(data_dir, view["definitions"])
     st.caption(f"{current['eligible_days']} eligible of {current['calendar_days']} calendar days · "
                f"{len(current['provisional_dates'])} provisional · {view['timezone']}")
-    pinned = prominent_keys(view["definitions"])
-    columns = st.columns(len(pinned))
-    for column, key in zip(columns, pinned, strict=True):
-        result = current["nutrients"][key]
-        column.metric(definitions[key]["name"], number(result["value"], " " + definitions[key]["unit"]))
-        column.caption(result["status_label"] + " · " +
-                       result["quality"] + " · " +
-                       number(result["coverage_pct"], "%") + " occurrence coverage")
-    st.caption("Protein: 150 g/day central target; 130 g/day On Track floor. Total Sugar is informational and includes naturally occurring sugars.")
+    st.subheader("Pinned metrics")
+    for start in range(0, len(preferences["pinned"]), 3):
+        batch = preferences["pinned"][start:start + 3]
+        for column, key in zip(st.columns(len(batch)), batch, strict=True):
+            with column.container(border=True):
+                _metric_card(definitions[key], current["nutrients"][key])
+    if not preferences["pinned"]:
+        st.caption("No metrics pinned. Add one in Customize metrics.")
+    attention = attention_keys(view, preferences)
+    if attention:
+        st.subheader("Needs Attention")
+        st.caption("Important unpinned metrics for this period. Your pins are unchanged.")
+        for column, key in zip(st.columns(len(attention)), attention, strict=True):
+            with column.container(border=True):
+                _metric_card(definitions[key], current["nutrients"][key])
+    with st.expander("Customize metrics"):
+        st.caption("Pins, order, and hidden metrics are saved locally. More than three pins are supported.")
+        for definition in view["definitions"]:
+            key = definition["key"]
+            pinned = key in preferences["pinned"]
+            hidden = key in preferences["hidden"]
+            columns = st.columns([3, 1, 1, 1, 1])
+            columns[0].write(definition["name"] + (" · Hidden" if hidden else ""))
+            actions = (("restore", "Restore") if hidden else ("unpin", "Unpin") if pinned else ("pin", "Pin"),
+                       None if hidden else ("hide", "Hide"),
+                       ("up", "↑") if pinned else None,
+                       ("down", "↓") if pinned else None)
+            for index, option in enumerate(actions, 1):
+                if option is None:
+                    continue
+                action, label = option
+                if columns[index].button(label, key=f"metric_{action}_{key}"):
+                    updated = change_preference(preferences, action, key, view["definitions"])
+                    save_preferences(data_dir, updated, view["definitions"])
+                    from loseit_mcp.publication import publish_snapshot
+
+                    publish_snapshot(data_dir)
+                    st.rerun()
+    st.caption("Total Sugar includes naturally occurring sugars and has no added-sugar limit.")
     rows = []
     for definition in view["definitions"]:
         key = definition["key"]
@@ -1018,7 +1080,7 @@ def main():
                         "Rolling 30 Days": "rolling_30"}[metric_period]
             view = read_metric_dashboard(args.data_dir, selected)
             if section == "Nutrients":
-                nutrient_view(view)
+                nutrient_view(view, args.data_dir)
             else:
                 food_pattern_view(view)
         except Exception:  # noqa: BLE001 - keep sensitive local data out of UI errors

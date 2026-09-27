@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .food_patterns import weekly_audit
+from .restricted_usda import configured_restricted_client
 
 LABEL = "com.local.loseit-readonly.weekly-pattern-audit"
 SCHEDULE = {"Weekday": 7, "Hour": 11, "Minute": 30}  # Sunday local time
@@ -77,11 +78,13 @@ def run(data_dir: Path, *, now: datetime | None = None) -> dict:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return {"status": "busy", "completed_at": current.isoformat()}
-        # Scheduled runs are local-only. Sending private food names/brands to
-        # an external provider requires a separately reviewed authorization.
-        result = weekly_audit(data, today=current.date())
+        # The provider accepts ProductIdentity(name, brand) only. Occurrence,
+        # diary, serving and account context stay in local SQL and audit rows.
+        result = weekly_audit(data, today=current.date(),
+                              usda_client=configured_restricted_client())
         publication = None
-        if result["classifications_created"] or result["research_classifications_created"]:
+        if (result["classifications_created"] or result["research_classifications_created"]
+                or (result["usda_research"] and result["usda_research"]["added_sugar_evidence_created"])):
             from .publication import publish_snapshot
 
             publication = publish_snapshot(data, today=current.date())

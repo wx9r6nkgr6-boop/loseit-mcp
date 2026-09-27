@@ -117,3 +117,101 @@ Latest published HTML: `~/Library/Mobile Documents/com~apple~CloudDocs/Nutrition
 ## Git record
 
 Branch: `feat/read-only-nutrition-repository`. Commit, push status, remote/local hash match, and final tree state are recorded in the task response after the final commit. The pre-existing untracked `missing_coverage.json` is intentionally excluded.
+
+---
+
+# Customizable Home and restricted USDA follow-up — 2026-09-26
+
+This dated section supersedes the earlier “customization deferred” and “USDA disabled” statements above. The 2026-09-25 measurements remain historical snapshots. The current pass used a new pre-change backup at `/tmp/loseit-home-prepass-20260926.sqlite3`, SHA-256 `42b8e2723e3ebc94ccf8ce61d42ce098c241dd3966a6e88933af212001ed42b3`.
+
+## USDA data-egress audit
+
+The weekly job ranks foods by occurrence count and source calories **inside SQLite**. It constructs `ProductIdentity(name, brand)` and passes only that two-field object to `RestrictedUsdaClient.review`. The client sends a USDA `/foods/search` POST with exactly `query` (normalized brand and product-name words), `dataType`, and fixed `pageSize=20`; it uses the configured USDA API key as the required authentication query parameter. A follow-up USDA `/food/{fdcId}` GET contains only the USDA ID returned by the exact search result. These endpoints and the key requirement are documented in the [USDA FoodData Central API Guide](https://fdc.nal.usda.gov/api-guide/). HTTP requests go only to `https://api.nal.usda.gov/fdc/v1`; the approval does not enable other research providers.
+
+| May leave for USDA | Stays local and is not in the request object |
+|---|---|
+| Product/food name; brand/manufacturer; USDA-returned FDC ID for detail lookup; USDA API key for authentication | Occurrence counts/frequency; consumption or audit dates; meal names; logged quantities/servings; diary context; accompanying foods; consumed calories/nutrients; source food/canonical IDs; Lose It account and user identifiers; raw payloads |
+
+The request construction is checked with a fake HTTP transport, not merely a fake research provider. Tests assert the exact URL, method, query parameters, JSON keys and body, and reject private-context fields. The provider accepts only exact normalized name and exact brand owner/name for branded records; ambiguous/multiple results, weak names, missing explicit Added Sugars, and unreconciled serving units cannot create evidence. Generic category evidence is recorded only from an exact generic identity. Current branded evidence is date-scoped from the research date. No total-sugar value substitutes for Added Sugar. Locally stored audit summaries retain prioritization counts for traceability, but those summaries are neither sent to USDA nor included in the static export.
+
+### Controlled research and Added Sugar before/after
+
+Thirty recent higher-impact identities were researched on a database copy and then in the live local derived layer. **No exact identity passed** the conservative name/brand requirement, so no added-sugar or food-pattern assertion was created. One USDA HTTP 400 arose from punctuation in a product name; the query now normalizes *only* approved name/brand words. The retry returned a normal no-exact-match result. An immediate repeated weekly run made **zero additional USDA requests** and created no evidence. The live audit history grew from one to three rows: the initial restricted pass, a changed outcome after the provider-error fix, and no duplicate row for the final repeat. This is a useful negative result rather than a reason to loosen matching.
+
+| Measure | Before | After |
+|---|---:|---:|
+| Canonical foods with Added Sugar evidence | 4 | 4 |
+| Added-sugar evidence rows | 4 | 4 |
+| Historical occurrences with defensible Added Sugar | 206 / 1,270 (16.2%) | 206 / 1,270 (16.2%) |
+| Historical source-calorie coverage | 6.8% | 6.8% |
+| Rolling-30-day occurrence coverage | 22.3% | 22.3% |
+| Rolling-30-day source-calorie coverage | 10.4% | 10.4% |
+| Food-pattern evidence assertions | 13 | 13 |
+
+The four existing Added Sugar assertions are **two high-confidence USDA generic verified zeros** and **two high-confidence current manufacturer-label zeros**. No low-confidence USDA substitute was added. The rolling gate remains **90% of occurrences and 90% of source calories**, so Added Sugar is unavailable for scoring and Total Sugar remains the third default pin. Current branded labels cannot backfill older diary entries.
+
+All 30 reviewed identities were rejected because no exact USDA product identity matched the local name and brand: Slim Fast Coffee House Shake; Great Value Seasoned Fries; Kellogg's Pop-Tarts Chocolate Chip Cookie Dough; Walmart Frosted Sugar Cookie; Nature's Valley Dark Chocolate Crunchy Oats Granola Bar; Great Value Cheese Ravioli; Dymatize Dunkin’ Mocha Latte protein powder; AMC Large Buttered Popcorn; Thomas' 100% Whole Wheat Bagel; Beyond Meat Beyond Burger; Jimmy Dean Pancakes & Sausage on a Stick; Hershey's Dark Chocolate Kisses; Birds Eye frozen chicken stir fry; Stouffer's Chicken & Vegetable Rice Bake; Marketside Double Chocolate Iced Cake; North Italia White Truffle Garlic Bread; Great Value Chicken Alfredo; Oreo Frozen Dessert Mini Cones; Oscar Mayer Beef & Pork Franks (logged brand typo); Banquet Salisbury Steak with Brown Gravy; Marketplace Chocolate Brioche; Red Lobster Cheddar Bay Biscuit; Red Lobster New Orleans Salmon; Big Marty's Sesame Hamburger Bun; Wonder Hot Dog Bun; Starbucks Venti Iced White Chocolate Mocha; Rigatoni Bolognese; Kroger Brown Sugar Hickory Baked Beans (logged typo); Stouffer's Chicken Alla Vodka; and Farmhouse Large Eggs. The locally retained audit row preserves the exact logged names/brands and outcomes. None reached the serving-match stage because identity failed first. The list includes generic, restaurant, and typo-bearing identities precisely to avoid silently accepting a merely similar USDA record.
+
+## Customization and goal-card behavior
+
+`home_cards.py` is the shared, UI-independent card and preference layer. Defaults are Protein, Fiber, Total Sugar. The Streamlit view supports pin, unpin, reorder up/down, hide, and restore, with any number of pins. It stores only stable IDs in owner-only `dashboard_preferences.json` in the local nutrition data directory, then republishes the static defaults. Corrupt/oversized preference data falls back safely; retired IDs are ignored and new metrics remain visible but unpinned. No preference is written to raw Lose It tables.
+
+The static HTML contains the same card model plus device-local controls backed by `localStorage` key `nutritionHomePreferencesV1` (only pin/hidden metric IDs), with an in-memory fallback if storage is unavailable. A user’s device-local choices take precedence over the published Mac defaults on that device. Period and Nutrients/Food Patterns view selections also persist locally. Hidden metrics leave the new nutrient table and attention section; pinned metrics appear once in the pinned area. No passwords, token, diary data, or food research is in preference storage.
+
+Minimum cards show capped adequacy progress toward the daily-average target. Maximum cards use a visually separate limit bar and describe the amount **over** a limit; they never call excess “positive progress.” Protein displays 150 g/day and the 130 g/day On Track floor. Saturated Fat shows `<10% kcal`; Sodium shows `≤2,300 mg/day`. Informational Total Sugar, Total Fat, Carbohydrates, Cholesterol, and Calories without a validated Lose It allowance have no goal bar. Weight has no completion bar and says “unit unconfirmed” when appropriate. A future scored range can show position within a range without treating the upper bound as a target.
+
+“Needs Attention” temporarily shows up to two **unpinned, unhidden**, reportable metrics with Needs Attention or Significantly Off Track after at least two eligible days. Incomplete or informational metrics cannot enter this section. It does not alter permanent pin order. The static and Streamlit views share the same rule; the static client recomputes after local customization.
+
+### Real-data card validation, 2026-09-26
+
+Values below use the live metric engine, not hard-coded UI numbers. Current Week has five eligible logged days, Last Week seven, and Rolling 30 Days twenty-nine; included days without explicit completion are provisional. Goal comparisons use the period’s daily mean, so future or unlogged days are not counted as zero.
+
+| Card | Current Week | Last Week | Rolling 30 Days | Presentation checked |
+|---|---:|---:|---:|---|
+| Protein | 93.0 g/day | 117.3 g/day | 108.9 g/day | 62%, 78%, 73% toward 150 g/day; capped adequacy bar; 130 g/day floor visible |
+| Fiber | 21.5 g/day | 21.9 g/day | 23.0 g/day | 77%, 78%, 82% toward 28 g/day |
+| **Total Sugar** | 108.5 g/day | 83.5 g/day | 91.0 g/day | Informational, no added-sugar limit or progress bar |
+| Saturated Fat | 10.7% kcal | 14.8% kcal | 13.7% kcal | `<10% kcal` goal; 0.7, 4.8, 3.7 percentage points over limit; limit bar |
+| Sodium | 2,706.8 mg/day | 3,412.2 mg/day | 3,226.5 mg/day | `≤2,300 mg/day` goal; 406.8, 1,112.2, 926.5 mg/day over limit; limit bar |
+| Calories | 1,917.0 kcal/day | 2,253.6 kcal/day | 2,187.9 kcal/day | Informational intake; no invented Lose It allowance |
+| Weight | 196.4, unit unconfirmed | 197.8, unit unconfirmed | 196.4, unit unconfirmed | Context only, no target or conventional progress bar |
+| Added Sugar | Unavailable | Unavailable | Unavailable | Incomplete, not promoted |
+
+With the default three pins, Current Week surfaces **Sodium** once in Needs Attention; Last Week and Rolling 30 Days surface **Saturated Fat and Sodium** once each. Test cases additionally exercise five pins, moving a pin, hiding/restoring a pinned metric, corrupt preference fallback, and exclusion of pinned/hidden/incomplete/informational attention candidates.
+
+## Weekly job, publication, and safety
+
+The existing LaunchAgent `com.local.loseit-readonly.weekly-pattern-audit` remains loaded for **Sunday 11:30 AM local time**, after the daily 10:00 AM update. Its Python command now uses the restricted USDA client when the owner-only key is configured, otherwise local-only fallback. Candidate count and source calories are local ranking inputs. The controlled manual live run, provider-error retry, and immediate repeat created no new nutrition evidence and no duplicate final audit row; the last run made zero USDA requests. Failure is contained to the weekly job and does not alter the daily update. No Harbor cloud migration was made because this workflow needs the local SQLite repository and iCloud destination.
+
+The updated iCloud HTML/JSON expose three periods, Nutrients and Food Patterns, semantic goal cards, the compact attention section, and safe metric-ID preferences. Published files were scanned for credentials, headers, raw snapshots, and internal USDA audit fields; no forbidden marker was present. The emitted JavaScript passed a syntax check. Browser URL policy blocked opening the local/iCloud HTML in the available browser tool and expressly prohibited alternate routes, so **375px phone, 768px tablet, and desktop visual layout and interaction screenshots could not be verified**. Static markup/CSS inspection, semantic model tests, script syntax, and exported-file assertions passed; visual/browser behavior remains a verification limit.
+
+Final static publication was `2026-09-27T02:59:54Z` (September 26 in New York). HTML SHA-256: `beebca9aa89f7d22840c4207035de99dd6b92efdd978adb2a3c19a8f49486019`. JSON SHA-256: `a7a738c458de8a987d00795395f44a45e19067b732dde695ff6ea595734ee860`. Both files were read back and scanned after publication.
+
+The live database still has 283 raw diary snapshots, 17 raw weight snapshots, 1,270 normalized occurrences, 265 canonical foods, and 280 formulations. Row digests for all five of those tables exactly match the pre-pass backup. SQLite integrity is `ok`. The exact Lose It MCP read-only allowlist was not modified; no workout app code was touched. iPhone deployment: **N/A**. iPad deployment: **N/A**. Apple Watch deployment: **N/A**.
+
+## Numbered follow-up implementation record
+
+Each entry includes disposition, files, live result, verification, and remaining limit/follow-up. “No new evidence” below reflects the conservative USDA outcome, not a failed request boundary.
+
+1. **USDA approval — applied.** Files: `restricted_usda.py`, `food_patterns.py`. The provider receives name/brand only; thirty live identities were queried. Exact-field HTTP tests pass. Scope remains USDA only.
+2. **Request privacy audit — complete.** Files: `restricted_usda.py`, `tests/test_home_cards_restricted_usda.py`. Local counts never enter the client; fake transport proves only the approved search body and FDC-ID detail path. Future providers require their own review.
+3. **Restricted research — complete, no accepted match.** Files: `food_patterns.py`, `weekly_scheduler.py`. Thirty identity queries were logged locally; four pre-existing Added Sugar foods and 22.3%/10.4% rolling coverage remain. Exact-match rejection and retry behavior were checked. More precise product identifiers/servings would be needed for additional evidence.
+4. **Customizable Home — delivered.** Files: `home_cards.py`, `dashboard.py`, `publication.py`. Local pin/unpin/reorder/hide/restore works with >3 pins; tests cover all actions. Static browser state is per device rather than shared back to the Mac.
+5. **Goals on cards — delivered.** Files: `home_cards.py`, both renderers. Protein, Fiber, Sodium, and Saturated Fat show current value, target, and semantic progress. Live labels above and static assertions verify them. Unavailable Added Sugar stays unscored.
+6. **Semantic bars — delivered.** Files: `home_cards.py`, `dashboard.py`, `publication.py`. Adequacy caps at 100%; over-limit uses explicit overage text and distinct color; informational/trend omit bars. Unit tests cover each type. Product bands remain reference UX, not clinical guidance.
+7. **Period-aware goals — delivered.** Files: existing `metric_engine.py`, `home_cards.py`. Three periods use eligible daily means; 5/7/29 live eligible days. Existing period tests and live comparisons pass. Completion-unknown days remain provisional.
+8. **Needs Attention — delivered.** Files: `home_cards.py`, both renderers. Current Week surfaces Sodium; other periods surface Sodium and Saturated Fat without duplicating pins. Tests exclude incomplete/informational/hidden metrics. Limited to two cards.
+9. **Card hierarchy — delivered in code.** Files: both renderers. Current amount has the largest type, with goal/progress/status/context below. HTML/CSS inspected and script syntax checked. Pixel-level device inspection was blocked by browser policy.
+10. **Two views — preserved.** Files: `dashboard.py`, `publication.py`. Shared period state remains across Nutrients and Food Patterns; static has view buttons. Tests verify both view structures. Browser interaction could not be visually exercised.
+11. **Weekly audit — restricted USDA enabled.** Files: `weekly_scheduler.py`, `food_patterns.py`. Loaded Sunday 11:30 AM job, live controlled/repeat runs, no duplicate evidence. A missing key safely leaves local-only mode. Exact identity scarcity limits enrichment.
+12. **Preference storage — delivered.** Files: `home_cards.py`, `publication.py`. Owner-only JSON and browser-local metric IDs survive refresh; corrupt data falls back; new/retired IDs handled. Tests verify file mode and normalization. Device choices are intentionally not synced back.
+13. **Static iCloud — delivered.** Files: `publication.py`. New goals, bars, selector, view toggle, preferences and attention are in HTML/JSON; privacy and script checks pass. Browser policy prevented rendered screen checks.
+14. **Real-data UI validation — code/data complete; rendered check blocked.** Files: this report, tests. Live card values and copy are above. The browser tool rejected the local HTML URL and prohibited alternate routes, so width-specific screenshots are outstanding.
+15. **Backend continuity — preserved.** Files: shared card layer and limited weekly additions only. Existing period/status/food-pattern engines remain intact. Full regression suite passes. No foundational redesign required.
+16. **Raw data/security — verified.** Files: privacy tests and this report. Five source/resolved tables retain exact row digests; SQLite integrity `ok`; no Lose It write capability. Future source changes require their own baseline.
+17. **Testing — complete.** Files: new privacy/card tests and static export assertions. Full suite, Ruff, syntax check, and privacy scan passed. Rendered browser QA remains blocked.
+18. **Documentation — updated.** Files: governing spec and this dated report. USDA boundary, unchanged coverage, preference model, card semantics, weekly behavior and limits are recorded. Revise when evidence or data changes.
+19. **Reporting — complete.** Files: this dated section. It includes egress, research outcomes, before/after, live cards, customization, weekly job and limitations. Counts are point-in-time.
+20. **Regression audit — complete.** Files: `restricted_usda.py`, `home_cards.py`, tests. USDA rejected a punctuated approved product query with HTTP 400; normalizing only name/brand words fixed it and a regression test locks that behavior. Code review found that an exact USDA category alone could mark a mixed dish such as tomato sauce as meaningful vegetables; the restricted client now excludes mixed-dish identities and has a test. Weight initially displayed the literal “source unit”; it now says “unit unconfirmed.” The first customization-control iteration contained an empty action option; it was corrected before release. No unresolved code regression is known; visual browser QA remains unverified.
+21. **Git — to be recorded at pass completion.** Files: this implementation set only. Commit/push/hash and final tree state appear in the final task response. Pre-existing `.DS_Store` and `missing_coverage.json` remain untracked.
+22. **Device deployment — N/A.** No workout app files changed. iPhone: N/A; iPad: N/A; Apple Watch: N/A. Future workout integration remains separate.

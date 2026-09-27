@@ -223,7 +223,7 @@ def test_static_export_is_sanitized_responsive_atomic_and_preserves_good_version
     monkeypatch.setattr(publication, "ICLOUD_ROOT", cloud)
     destination = cloud / "Nutrition"
     save_publication_settings(tmp_path, destination, True)
-    result = publish_snapshot(tmp_path, today=date(2026, 9, 1))
+    result = publish_snapshot(tmp_path, today=date(2026, 9, 2))
     assert result["status"] == "published"
     html_text = (destination / "nutrition_dashboard.html").read_text()
     json_text = (destination / "nutrition_snapshot.json").read_text()
@@ -234,6 +234,12 @@ def test_static_export_is_sanitized_responsive_atomic_and_preserves_good_version
     assert snapshot["metric_views"]["current_week"]["current"]["nutrients"]["added_sugar_g"]["value"] is None
     assert "Food Patterns" in html_text and 'id="period-selector"' in html_text
     assert "@media(max-width:520px)" in html_text and "repeat(auto-fit,minmax" in html_text
+    assert 'id="metric-controls"' in html_text and "nutritionHomePreferencesV1" in html_text
+    assert "Goal: 150 g/day" in html_text and "metric-progress adequacy" in html_text
+    assert "Goal: ≤ 2,300 mg/day" in html_text and "limit_over" in html_text
+    assert 'data-view="patterns"' in html_text and 'data-view="nutrients"' in html_text
+    assert snapshot["dashboard_preferences"]["pinned"] == ["protein_g", "fiber_g", "sugar_g"]
+    assert set(snapshot["dashboard_preferences"]) == {"version", "pinned", "hidden"}
     lowered = (html_text + json_text).lower()
     assert all(marker not in lowered for marker in ("liauth", "api_key", "raw_diary_snapshots"))
     assert "sugar cookie" in lowered  # Food names are data, not credential material.
@@ -250,7 +256,7 @@ def test_static_export_is_sanitized_responsive_atomic_and_preserves_good_version
         raise RuntimeError("fixture export failure")
 
     monkeypatch.setattr(publication, "_encoded", fail)
-    failed = publish_snapshot(tmp_path, today=date(2026, 9, 1))
+    failed = publish_snapshot(tmp_path, today=date(2026, 9, 2))
     assert failed["status"] == "failed"
     assert (destination / "nutrition_dashboard.html").read_text() == prior_html
     assert (destination / "nutrition_snapshot.json").read_text() == prior_json

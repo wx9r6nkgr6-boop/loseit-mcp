@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .repository import NutritionRepository, _now, normalize_text
 from .resolved import serving_scale
+from .restricted_usda import ProductIdentity
 
 PATTERNS = (
     "vegetable", "fruit", "seafood", "fatty_fish", "whole_grain",
@@ -528,8 +529,89 @@ def added_sugar_period(c: sqlite3.Connection, start: date, end: date,
     }
 
 
+def _restricted_usda_batch(c: sqlite3.Connection, *, today: date, client,
+                           prior_outcomes: dict, limit: int = 30) -> dict:
+    """Prioritize privately; send only ProductIdentity to the USDA client."""
+    start = today - timedelta(days=29)
+    rows = c.execute(
+        """SELECT f.id,f.canonical_name,f.canonical_brand,v.id formulation_id,v.version,
+                  s.canonical_amount,s.canonical_unit,COUNT(o.id) occurrences,
+                  SUM(COALESCE(n.value,0)) source_calories
+           FROM canonical_foods f JOIN food_formulations v ON v.canonical_food_id=f.id
+           JOIN food_source_identities i ON i.canonical_food_id=f.id
+           JOIN food_occurrences o ON o.source_food_id=i.source_food_id AND o.is_current=1
+           LEFT JOIN nutrient_observations n ON n.occurrence_id=o.id AND n.nutrient='calories'
+           LEFT JOIN formulation_servings s ON s.formulation_id=v.id
+                AND s.id=(SELECT MIN(id) FROM formulation_servings WHERE formulation_id=v.id)
+           WHERE o.source_date BETWEEN ? AND ?
+           AND v.version=(SELECT MAX(version) FROM food_formulations WHERE canonical_food_id=f.id)
+           AND NOT EXISTS (SELECT 1 FROM added_sugar_evidence e WHERE e.formulation_id=v.id)
+           GROUP BY f.id ORDER BY CASE WHEN s.canonical_unit='g' THEN 0 ELSE 1 END,
+                    source_calories DESC,occurrences DESC,f.id LIMIT ?""",
+        (start.isoformat(), today.isoformat(), limit),
+    ).fetchall()
+    outcomes = {}
+    reviewed = []
+    added_created = pattern_created = failures = 0
+    for row in rows:
+        fingerprint = _digest({"id": row["id"], "version": row["version"],
+                               "name": row["canonical_name"],
+                               "brand": row["canonical_brand"] or ""})[:16]
+        if fingerprint in prior_outcomes and prior_outcomes[fingerprint] != "provider_failed":
+            outcomes[fingerprint] = prior_outcomes[fingerprint]
+            continue
+        try:
+            identity = ProductIdentity(row["canonical_name"], row["canonical_brand"] or "")
+        except ValueError:
+            outcomes[fingerprint] = "invalid_identity"
+            reviewed.append({"canonical_food_id": row["id"], "outcome": "invalid_identity"})
+            continue
+        # The client receives no occurrence, date, meal, account, logged amount,
+        # or nutrient history. These fields are used only by the local SQL sort.
+        try:
+            finding = client.review(identity)
+        except Exception:  # noqa: BLE001 - provider failure must not corrupt the local audit
+            finding = {"outcome": "provider_failed"}
+            failures += 1
+        outcome = finding["outcome"]
+        reference = (f"https://fdc.nal.usda.gov/food-details/{finding['fdc_id']}/nutrients"
+                     if finding.get("fdc_id") else None)
+        if outcome == "exact_identity":
+            for assertion in finding["patterns"]:
+                pattern_created += record_pattern_evidence(
+                    c, canonical_food_id=row["id"], formulation_id=row["formulation_id"],
+                    evidence_url=reference, **assertion,
+                )
+            value = finding["added_sugar_per_100g"]
+            if value is None:
+                outcome = "exact_identity_no_added_sugar"
+            elif row["canonical_unit"] != "g" or not row["canonical_amount"]:
+                outcome = "exact_identity_serving_unreconciled"
+            else:
+                amount = float(row["canonical_amount"])
+                added_created += record_added_sugar(
+                    c, canonical_food_id=row["id"], formulation_id=row["formulation_id"],
+                    value_g=round(value * amount / 100, 6), basis_amount=amount,
+                    basis_unit="g", provenance="USDA_exact_branded_current" if identity.brand else
+                    "USDA_exact_generic", confidence="high",
+                    evidence_basis="Exact USDA identity; added sugars per 100 g scaled to the local gram serving",
+                    evidence_url=reference,
+                    valid_from=today.isoformat() if identity.brand else None,
+                )
+                outcome = "added_sugar_recorded_current" if identity.brand else "added_sugar_recorded_generic"
+        outcomes[fingerprint] = outcome
+        reviewed.append({"canonical_food_id": row["id"], "name": identity.name,
+                         "brand": identity.brand, "outcome": outcome,
+                         "fdc_id": finding.get("fdc_id"),
+                         "occurrences_local": row["occurrences"],
+                         "source_calories_local": round(row["source_calories"] or 0, 1)})
+    return {"outcomes": outcomes, "reviewed": reviewed,
+            "added_sugar_evidence_created": added_created,
+            "pattern_evidence_created": pattern_created, "provider_failures": failures}
+
+
 def weekly_audit(data_dir: Path, *, today: date | None = None,
-                 research_provider=None) -> dict:
+                 research_provider=None, usda_client=None) -> dict:
     """Research queue refresh; safe without a network provider or AI service."""
     today = today or date.today()  # noqa: DTZ011
     start = today - timedelta(days=29)
@@ -552,8 +634,11 @@ def weekly_audit(data_dir: Path, *, today: date | None = None,
         provider_failures = 0
         outcomes = {}
         prior_outcomes = {}
+        prior_usda_outcomes = {}
         for audit_row in c.execute("SELECT summary_json FROM food_pattern_audit_runs ORDER BY id"):
-            prior_outcomes.update(json.loads(audit_row[0]).get("research_outcomes", {}))
+            prior_summary = json.loads(audit_row[0])
+            prior_outcomes.update(prior_summary.get("research_outcomes", {}))
+            prior_usda_outcomes.update((prior_summary.get("usda_research") or {}).get("outcomes", {}))
         outcomes.update({f"{row[0]}:{row[3]}": prior_outcomes[f"{row[0]}:{row[3]}"]
                          for row in unresolved if prior_outcomes.get(f"{row[0]}:{row[3]}")
                          in {"no_match", "classified"}})
@@ -563,10 +648,7 @@ def weekly_audit(data_dir: Path, *, today: date | None = None,
                 if prior_outcomes.get(identity) in {"no_match", "classified"}:
                     continue
                 try:
-                    assertions = research_provider({"canonical_food_id": row[0],
-                                                     "name": row[1], "brand": row[2],
-                                                     "occurrences": row[4],
-                                                     "source_calories": row[5]})
+                    assertions = research_provider({"name": row[1], "brand": row[2]})
                     outcomes[identity] = "classified" if assertions else "no_match"
                     for assertion in assertions or ():
                         formulation = c.execute(
@@ -588,17 +670,25 @@ def weekly_audit(data_dir: Path, *, today: date | None = None,
                 except Exception:  # noqa: BLE001 - provider failures must not break local audit
                     provider_failures += 1
                     outcomes[identity] = "failed"
+        usda = (_restricted_usda_batch(c, today=today, client=usda_client,
+                                       prior_outcomes=prior_usda_outcomes)
+                if usda_client is not None else None)
+        if usda is not None:
+            provider_failures += usda["provider_failures"]
         fingerprint = _digest({"week": today.isocalendar()[:2],
                                "unresolved": [r[0] for r in unresolved],
-                               "outcomes": outcomes})
+                               "outcomes": outcomes,
+                               "usda_outcomes": usda["outcomes"] if usda else {}})
         summary = {**classified, "unresolved_recent_foods": len(unresolved),
                    "research_candidates": [{"canonical_food_id": r[0], "name": r[1],
                                             "occurrences": r[4],
                                             "source_calories": round(r[5] or 0, 1)} for r in unresolved],
-                   "research_classifications_created": researched,
+                   "research_classifications_created": researched +
+                   (usda["pattern_evidence_created"] if usda else 0),
                    "research_outcomes": outcomes,
+                   "usda_research": usda,
                    "provider_failures": provider_failures,
-                   "provider_status": "local_only_external_research_disabled" if research_provider is None else
+                   "provider_status": "local_only_provider_unavailable" if research_provider is None and usda_client is None else
                    "failed" if provider_failures else "complete"}
         c.execute(
             """INSERT OR IGNORE INTO food_pattern_audit_runs

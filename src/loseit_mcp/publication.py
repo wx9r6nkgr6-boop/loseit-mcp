@@ -13,7 +13,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from .analytics import period_dates, read_analytics
-from .metric_engine import prominent_keys, read_metric_dashboard
+from .home_cards import card_model, load_preferences
+from .metric_engine import read_metric_dashboard
 from .proposals import read_settings, reader
 from .repository import NutritionRepository, _now
 from .resolved import library_status
@@ -142,6 +143,10 @@ def build_snapshot(
             }
         )
     library = library_status(data_dir)
+    metric_views = {
+        period: read_metric_dashboard(data_dir, period, today=today)
+        for period in ("current_week", "last_week", "rolling_30")
+    }
     return {
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "read_only": True,
@@ -167,10 +172,8 @@ def build_snapshot(
         "foods": foods,
         "weight": report["weight_summary"],
         "insights": report["insights"],
-        "metric_views": {
-            period: read_metric_dashboard(data_dir, period, today=today)
-            for period in ("current_week", "last_week", "rolling_30")
-        },
+        "metric_views": metric_views,
+        "dashboard_preferences": load_preferences(data_dir, metric_views["current_week"]["definitions"]),
         "data_quality": {
             "research_items": report["data_quality"]["research_queue_count_global"],
             "source_gap_occurrences": report["data_quality"]["source_gap_occurrences"],
@@ -194,6 +197,117 @@ def _display(value, suffix=""):
     return "Unavailable" if value is None else f"{value:,.1f}{suffix}"
 
 
+def _static_card(definition: dict, result: dict) -> str:
+    card = card_model(definition, result)
+    key = html.escape(card["key"])
+    progress = ""
+    if card["progress_kind"]:
+        width = 100 * card["progress_fraction"]
+        progress = (
+            f'<div class="metric-progress {card["progress_kind"]}" role="img" '
+            f'aria-label="{html.escape(card["progress_text"] or "")}">'
+            f'<span style="width:{width:.1f}%"></span></div>'
+            f'<div class="progress-copy">{html.escape(card["progress_text"] or "")}</div>'
+        )
+    goal = f'<div class="goal-copy">{html.escape(card["goal_text"])}</div>' if card["goal_text"] else ""
+    previous = f'<div class="comparison">{html.escape(card["previous_text"])}</div>' if card["previous_text"] else ""
+    return (
+        f'<article class="card metric-card" data-metric-key="{key}" '
+        f'data-status="{html.escape(result["status"])}" '
+        f'data-quality="{html.escape(result["quality"])}" '
+        f'data-reportable="{str(bool(result.get("reportable"))).lower()}">'
+        f'<small>{html.escape(card["name"])}</small>'
+        f'<strong>{html.escape(card["value_text"])}</strong>'
+        f'{progress}{goal}<div class="metric-status">{html.escape(card["status"])} · '
+        f'{html.escape(card["quality"])}</div>{previous}</article>'
+    )
+
+
+def _home_script(snapshot: dict) -> str:
+    definitions = snapshot["metric_views"]["current_week"]["definitions"]
+    metadata = [{"key": item["key"], "name": item["name"]} for item in definitions]
+    serialized = json.dumps({"definitions": metadata,
+                             "preferences": snapshot["dashboard_preferences"]}, ensure_ascii=False)
+    # Only stable metric IDs and display names enter this script; never diary data.
+    serialized = serialized.replace("<", "\\u003c").replace(">", "\\u003e")
+    return "const homeConfig=" + serialized + ";" + """
+const validKeys=new Set(homeConfig.definitions.map(item=>item.key));
+const prefKey='nutritionHomePreferencesV1';
+const safeGet=key=>{try{return localStorage.getItem(key)}catch{return null}};
+const safeSet=(key,value)=>{try{localStorage.setItem(key,value)}catch{}};
+function normalizePrefs(raw){
+  if(!raw||raw.version!==1||!Array.isArray(raw.pinned)||!Array.isArray(raw.hidden))raw=homeConfig.preferences;
+  const pinned=[...new Set(raw.pinned.filter(key=>typeof key==='string'&&validKeys.has(key)))];
+  const hidden=[...new Set(raw.hidden.filter(key=>typeof key==='string'&&validKeys.has(key)&&!pinned.includes(key)))];
+  return {version:1,pinned,hidden};
+}
+let savedPrefs=null;
+try{savedPrefs=JSON.parse(safeGet(prefKey))}catch{}
+let prefs=normalizePrefs(savedPrefs);
+function persist(){safeSet(prefKey,JSON.stringify(prefs));renderControls();renderCards()}
+function renderControls(){
+  const host=document.getElementById('metric-controls');host.replaceChildren();
+  for(const item of homeConfig.definitions){
+    const row=document.createElement('div');row.className='control-row';
+    const label=document.createElement('span');label.textContent=item.name+(prefs.hidden.includes(item.key)?' · Hidden':'');row.append(label);
+    const actions=prefs.hidden.includes(item.key)?[['restore','Restore']]:
+      prefs.pinned.includes(item.key)?[['unpin','Unpin'],['hide','Hide'],['up','↑'],['down','↓']]:[['pin','Pin'],['hide','Hide']];
+    for(const [action,title] of actions){const button=document.createElement('button');button.type='button';button.textContent=title;
+      button.dataset.action=action;button.dataset.key=item.key;row.append(button)}host.append(row);
+  }
+}
+document.getElementById('metric-controls').addEventListener('click',event=>{
+  const button=event.target.closest('button[data-action]');if(!button)return;
+  const key=button.dataset.key,action=button.dataset.action;if(!validKeys.has(key))return;
+  if(action==='pin'){prefs.hidden=prefs.hidden.filter(item=>item!==key);if(!prefs.pinned.includes(key))prefs.pinned.push(key)}
+  else if(action==='unpin')prefs.pinned=prefs.pinned.filter(item=>item!==key);
+  else if(action==='hide'){prefs.pinned=prefs.pinned.filter(item=>item!==key);if(!prefs.hidden.includes(key))prefs.hidden.push(key)}
+  else if(action==='restore')prefs.hidden=prefs.hidden.filter(item=>item!==key);
+  else if(action==='up'||action==='down'){const index=prefs.pinned.indexOf(key),next=index+(action==='up'?-1:1);
+    if(index>=0&&next>=0&&next<prefs.pinned.length)[prefs.pinned[index],prefs.pinned[next]]=[prefs.pinned[next],prefs.pinned[index]]}
+  prefs=normalizePrefs(prefs);persist();
+});
+function renderCards(){
+  for(const section of document.querySelectorAll('.period-view')){
+    const bank=section.querySelector('.card-bank'), pinnedHost=section.querySelector('.pinned-cards');
+    const attentionHost=section.querySelector('.attention-cards');
+    const cards=new Map([...section.querySelectorAll('.metric-card')].map(card=>[card.dataset.metricKey,card]));
+    for(const card of cards.values())bank.append(card);
+    pinnedHost.replaceChildren();attentionHost.replaceChildren();
+    for(const key of prefs.pinned){const card=cards.get(key);if(card)pinnedHost.append(card)}
+    const eligible=Number(section.dataset.eligibleDays);
+    const attention=[...cards.values()].filter(card=>!prefs.pinned.includes(card.dataset.metricKey)&&
+      !prefs.hidden.includes(card.dataset.metricKey)&&card.dataset.reportable==='true'&&
+      card.dataset.quality!=='Incomplete'&&eligible>=2&&
+      ['needs_attention','significantly_off_track'].includes(card.dataset.status));
+    attention.sort((a,b)=>(a.dataset.status==='significantly_off_track'?0:1)-
+      (b.dataset.status==='significantly_off_track'?0:1)||a.dataset.metricKey.localeCompare(b.dataset.metricKey));
+    for(const card of attention.slice(0,2))attentionHost.append(card);
+    section.querySelector('.attention-section').hidden=attentionHost.children.length===0;
+    for(const row of section.querySelectorAll('tr[data-metric-key]'))row.hidden=
+      prefs.hidden.includes(row.dataset.metricKey)||prefs.pinned.includes(row.dataset.metricKey);
+  }
+}
+const periodSelector=document.getElementById('period-selector');
+const savedPeriod=safeGet('nutritionPeriod');
+if([...periodSelector.options].some(option=>option.value===savedPeriod))periodSelector.value=savedPeriod;
+let selectedView=safeGet('nutritionView')==='patterns'?'patterns':'nutrients';
+function showSelection(){
+  for(const section of document.querySelectorAll('.period-view')){
+    section.hidden=section.id!==periodSelector.value;
+    section.querySelector('.nutrition-pane').hidden=selectedView!=='nutrients';
+    section.querySelector('.pattern-pane').hidden=selectedView!=='patterns';
+  }
+  document.getElementById('customize-panel').hidden=selectedView!=='nutrients';
+  for(const button of document.querySelectorAll('[data-view]'))button.setAttribute('aria-pressed',String(button.dataset.view===selectedView));
+  safeSet('nutritionPeriod',periodSelector.value);safeSet('nutritionView',selectedView);
+}
+periodSelector.addEventListener('change',showSelection);
+for(const button of document.querySelectorAll('[data-view]'))button.addEventListener('click',()=>{selectedView=button.dataset.view;showSelection()});
+renderControls();renderCards();showSelection();
+"""
+
+
 def render_html(snapshot: dict) -> str:
     metric_views = snapshot.get("metric_views", {})
     metric_html = ""
@@ -209,15 +323,12 @@ def render_html(snapshot: dict) -> str:
             continue
         current = view["current"]
         definitions = {definition["key"]: definition for definition in view["definitions"]}
-        prominent = "".join(
-            f'<article class="card"><small>{html.escape(definitions[key]["name"])}</small>'
-            f'<strong>{html.escape(_display(current["nutrients"][key]["value"], " " + definitions[key]["unit"]))}</strong>'
-            f'<span>{html.escape(current["nutrients"][key]["status_label"])} · '
-            f'{html.escape(str(current["nutrients"][key]["coverage_pct"]))}% occurrence coverage</span></article>'
-            for key in prominent_keys(view["definitions"])
+        card_bank = "".join(
+            _static_card(definition, current["nutrients"][definition["key"]])
+            for definition in view["definitions"]
         )
         nutrient_rows = "".join(
-            "<tr>" + f'<td>{html.escape(definition["name"])}</td>'
+            f'<tr data-metric-key="{html.escape(key)}">' + f'<td>{html.escape(definition["name"])}</td>'
             f'<td>{html.escape(_display(current["nutrients"][key]["value"], " " + definition["unit"]))}</td>'
             f'<td>{html.escape(current["nutrients"][key]["status_label"])}</td>'
             f'<td>{html.escape(current["nutrients"][key]["quality"])}</td>'
@@ -245,28 +356,24 @@ def render_html(snapshot: dict) -> str:
             for name, count in current["food_patterns"]["vegetable"].get("subgroups", {}).items()
         ) or "None classified"
         metric_html += (
-            f'<section class="period-view" id="{period}"><h2>{title}</h2>'
+            f'<section class="period-view" id="{period}" data-eligible-days="{current["eligible_days"]}"><h2>{title}</h2>'
             f'<p>{current["eligible_days"]} eligible of {current["calendar_days"]} calendar days; '
             f'{len(current["provisional_dates"])} provisional.</p>'
-            f'<div class="grid">{prominent}</div><h2>Nutrients</h2><div class="panel"><table>'
+            '<div class="nutrition-pane"><h2>Pinned metrics</h2>'
+            f'<div class="card-bank" hidden>{card_bank}</div>'
+            '<div class="grid pinned-cards"></div>'
+            '<section class="attention-section" hidden><h2>Needs Attention</h2>'
+            '<p>Important unpinned metrics for this period. Your pins are unchanged.</p>'
+            '<div class="grid attention-cards"></div></section>'
+            '<h2>Other nutrients</h2><div class="panel"><table>'
             '<thead><tr><th>Metric</th><th>Value</th><th>Status</th><th>Quality</th><th>Previous comparable</th><th>Coverage</th><th>Source / estimated entries</th><th>Note</th></tr></thead>'
-            f'<tbody>{nutrient_rows}</tbody></table></div><h2>Food Patterns</h2><div class="panel"><table>'
+            f'<tbody>{nutrient_rows}</tbody></table></div></div>'
+            '<div class="pattern-pane" hidden><h2>Food Patterns</h2><div class="panel"><table>'
             '<thead><tr><th>Pattern</th><th>Verified quantity</th><th>Meaningful occurrences / distinct plants</th><th>Additional directional</th><th>Unknown entries</th><th>Classified</th><th>Evidence</th><th>Quality</th><th>Reference</th></tr></thead>'
             f'<tbody>{pattern_rows}</tbody></table></div>'
             f'<p>Vegetable subgroups: {html.escape(subgroup_summary)}</p>'
-            f'<p>Qualifying plants: {html.escape(", ".join(current["food_patterns"]["plant_variety"]["qualifying_foods"]) or "None classified")}</p></section>'
+            f'<p>Qualifying plants: {html.escape(", ".join(current["food_patterns"]["plant_variety"]["qualifying_foods"]) or "None classified")}</p></div></section>'
         )
-    averages = snapshot["period_averages"]
-    cards = "".join(
-        f'<article class="card"><small>{html.escape(label)}</small><strong>{html.escape(_display(averages[key]["usable_per_logged_day"], suffix))}</strong><span>{html.escape(_display(averages[key]["coverage_pct"], "%"))} coverage</span></article>'
-        for key, label, suffix in (
-            ("calories", "Calories / logged day", ""),
-            ("protein_g", "Protein / logged day", " g"),
-            ("carb_g", "Carbohydrates / logged day", " g"),
-            ("total_fat_g", "Total fat / logged day", " g"),
-            ("fiber_g", "Fiber / logged day", " g"),
-        )
-    )
     daily_rows = "".join(
         "<tr>"
         f"<td>{html.escape(row['date'])}</td>"
@@ -287,19 +394,20 @@ def render_html(snapshot: dict) -> str:
     completion = snapshot["completion"]
     completed = completion["latest_completed_date"] or "Not exposed by Lose It"
     updated = snapshot["nutrition_data_updated_at"] or snapshot["generated_at"]
+    home_script = _home_script(snapshot)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Nutrition Dashboard</title><style>
 :root{{--bg:#101014;--surface:#181820;--raised:#22222d;--text:#f4f4f6;--muted:#a6a6b4;--pink:#ff4f9a;--cyan:#48dfea;--border:#343442;--gap:clamp(.65rem,1.8vw,1.2rem)}}
 *{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(ellipse at top right,#ff4f9a18,transparent 48%),var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:clamp(14px,1.15vw,17px)}}
-main{{width:min(100% - clamp(1rem,5vw,4rem),1100px);margin:auto;padding:clamp(1rem,4vw,3rem) 0 4rem}}h1,h2{{text-transform:uppercase;letter-spacing:.04em;margin:.35em 0}}h1{{font-size:clamp(1.65rem,5vw,3rem)}}h2{{font-size:clamp(1rem,2.4vw,1.45rem);margin-top:2rem}}.eyebrow,small{{color:var(--cyan);font-weight:800;text-transform:uppercase;letter-spacing:.07em}}.fresh{{color:var(--muted);display:flex;flex-wrap:wrap;gap:.35rem 1.2rem;margin:1rem 0 1.5rem}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,12rem),1fr));gap:var(--gap)}}.card{{min-width:0;padding:clamp(.8rem,2vw,1.15rem);background:var(--raised);border:1px solid var(--border);border-top:2px solid var(--pink);border-radius:12px;display:flex;flex-direction:column;gap:.4rem}}.card strong{{font-size:clamp(1.35rem,3vw,2rem);color:var(--cyan);overflow-wrap:anywhere}}.card span,td span{{color:var(--muted)}}.panel{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:clamp(.7rem,2vw,1.2rem);overflow-x:auto}}table{{width:100%;border-collapse:collapse;min-width:32rem}}th,td{{padding:.7rem;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}}th{{color:var(--cyan);font-size:.78rem;text-transform:uppercase}}td:first-child{{overflow-wrap:anywhere;max-width:24rem}}li{{margin:.65rem 0;line-height:1.45}}footer{{color:var(--muted);margin-top:2rem;font-size:.85rem}}@media(max-width:520px){{main{{width:min(100% - 1rem,1100px)}}table{{min-width:28rem}}.panel{{padding:.35rem}}}}
+main{{width:min(100% - clamp(1rem,5vw,4rem),1100px);margin:auto;padding:clamp(1rem,4vw,3rem) 0 4rem}}h1,h2{{text-transform:uppercase;letter-spacing:.04em;margin:.35em 0}}h1{{font-size:clamp(1.65rem,5vw,3rem)}}h2{{font-size:clamp(1rem,2.4vw,1.45rem);margin-top:2rem}}.eyebrow,small{{color:var(--cyan);font-weight:800;text-transform:uppercase;letter-spacing:.07em}}.fresh{{color:var(--muted);display:flex;flex-wrap:wrap;gap:.35rem 1.2rem;margin:1rem 0 1.5rem}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,15rem),1fr));gap:var(--gap)}}.card{{min-width:0;padding:clamp(.8rem,2vw,1.15rem);background:var(--raised);border:1px solid var(--border);border-top:2px solid var(--pink);border-radius:12px;display:flex;flex-direction:column;gap:.4rem}}.card strong{{font-size:clamp(1.8rem,4vw,2.5rem);color:var(--cyan);overflow-wrap:anywhere;line-height:1.1}}.card span,td span{{color:var(--muted)}}.metric-progress{{height:10px;background:#343442;border-radius:99px;overflow:hidden;margin-top:.35rem}}.metric-progress span{{display:block;height:100%;background:var(--cyan)}}.metric-progress.limit span,.metric-progress.range span{{background:#e7ae58}}.metric-progress.limit_over span{{background:#ff7185}}.goal-copy{{color:var(--text);font-size:.9rem}}.progress-copy,.comparison,.metric-status{{color:var(--muted);font-size:.85rem}}.toolbar{{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin:1rem 0}}button,select{{background:var(--raised);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:.55rem .7rem;font:inherit;cursor:pointer}}button[aria-pressed=true]{{border-color:var(--cyan);color:var(--cyan)}}details{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.7rem 1rem}}summary{{cursor:pointer;font-weight:700}}.control-row{{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;padding:.5rem 0;border-bottom:1px solid var(--border)}}.control-row span{{flex:1 1 12rem}}.panel{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:clamp(.7rem,2vw,1.2rem);overflow-x:auto}}table{{width:100%;border-collapse:collapse;min-width:32rem}}th,td{{padding:.7rem;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}}th{{color:var(--cyan);font-size:.78rem;text-transform:uppercase}}td:first-child{{overflow-wrap:anywhere;max-width:24rem}}li{{margin:.65rem 0;line-height:1.45}}footer{{color:var(--muted);margin-top:2rem;font-size:.85rem}}[hidden]{{display:none!important}}@media(max-width:520px){{main{{width:min(100% - 1rem,1100px)}}table{{min-width:28rem}}.panel{{padding:.35rem}}.card strong{{font-size:2rem}}}}
 </style></head><body><main><div class="eyebrow">Workout companion · read-only nutrition</div><h1>Nutrition snapshot</h1>
 <div class="fresh"><span>Nutrition data updated: {html.escape(updated)}</span><span>Insights through: {html.escape(snapshot['insights_period']['end'])}</span><span>Last completed day in Lose It: {html.escape(completed)}</span></div>
-<label for="period-selector">Period</label> <select id="period-selector" aria-label="Nutrition period"><option value="current_week">Current Week</option><option value="last_week">Last Week</option><option value="rolling_30">Rolling 30 Days</option></select>
+<div class="toolbar"><button type="button" data-view="nutrients" aria-pressed="true">Nutrients</button><button type="button" data-view="patterns" aria-pressed="false">Food Patterns</button><label for="period-selector">Period</label> <select id="period-selector" aria-label="Nutrition period"><option value="current_week">Current Week</option><option value="last_week">Last Week</option><option value="rolling_30">Rolling 30 Days</option></select></div>
+<details id="customize-panel"><summary>Customize metrics</summary><p>Pin, unpin, reorder, hide or restore. These choices contain only metric IDs and stay in this browser.</p><div id="metric-controls"></div></details>
 {metric_html}
-<script>const selector=document.getElementById('period-selector');const views=document.querySelectorAll('.period-view');function showPeriod(){{for(const view of views)view.hidden=view.id!==selector.value;localStorage.setItem('nutritionPeriod',selector.value)}}const saved=localStorage.getItem('nutritionPeriod');if([...selector.options].some(option=>option.value===saved))selector.value=saved;selector.addEventListener('change',showPeriod);showPeriod();</script>
-<h2>Legacy overview · rolling 30 days</h2>
-<section class="grid">{cards}</section><h2>Useful observations</h2><section class="panel"><ul>{insights}</ul></section>
+<script>{home_script}</script>
+<h2>Useful observations</h2><section class="panel"><ul>{insights}</ul></section>
 <h2>Recent days</h2><section class="panel"><table><thead><tr><th>Date</th><th>Calories</th><th>Protein</th><th>Source day state</th></tr></thead><tbody>{daily_rows}</tbody></table></section>
 <h2>Frequent foods</h2><section class="panel"><table><thead><tr><th>Food</th><th>Occurrences</th><th>Calories</th><th>Protein</th></tr></thead><tbody>{food_rows}</tbody></table></section>
 <footer>Generated {html.escape(snapshot['generated_at'])}. This is a read-only local analytics export. Missing values are never treated as zero.</footer></main></body></html>"""
